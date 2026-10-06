@@ -1,0 +1,4 @@
+setupAgentStartupPolicy: wait-for-setup
+scripts:
+  setup: bash "$ORCA_ROOT_PATH/.ai-toolkit/scripts/setup.sh"
+  archive: bash "$ORCA_ROOT_PATH/.ai-toolkit/scripts/archive.sh"

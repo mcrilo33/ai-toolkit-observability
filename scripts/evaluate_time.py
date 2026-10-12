@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import bisect
 import datetime as dt
+import json
 import re
 import subprocess
 from collections import Counter
@@ -51,6 +52,7 @@ class Leaf:
     file_path: str = ""
     failed: bool = False
     blocked_s: float = 0.0
+    source: str = "langfuse"  # "raw" when only the collector's JSONL had the span
 
 
 def _attr(obs: dict, key: str, default=None):
@@ -81,8 +83,58 @@ def _leaf_kind(obs: dict) -> str | None:
     return None
 
 
-def build_leaves(observations: list[dict]) -> list[Leaf]:
-    """Turn Langfuse observations into leaves, marking failed tools and their blocked time."""
+def _leaves_from_raw(raw_records: list[dict], seen: set[str]) -> list[Leaf]:
+    """Build leaves from raw api_request/tool_result events whose id Langfuse never received."""
+    leaves = []
+    for rec in raw_records:
+        a, ended = rec["attrs"], rec["t"]
+        started = ended - float(a.get("duration_ms", 0)) / 1000
+        if rec["name"] == "claude_code.api_request" and a.get("request_id") not in seen:
+            counts = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")
+            leaves.append(
+                Leaf(
+                    "llm",
+                    "claude_code.llm_request",
+                    started,
+                    ended,
+                    cost=float(a.get("cost_usd", 0)),
+                    tokens=sum(int(a.get(k, 0)) for k in counts),
+                    claude=a.get("session.id", ""),
+                    source="raw",
+                )
+            )
+        elif rec["name"] == "claude_code.tool_result" and a.get("tool_use_id") not in seen:
+            tool_input = _parse_json_object(a.get("tool_input", ""))
+            leaves.append(
+                Leaf(
+                    "tool",
+                    a.get("tool_name", ""),
+                    started,
+                    ended,
+                    claude=a.get("session.id", ""),
+                    command=str(tool_input.get("command", "")),
+                    file_path=str(tool_input.get("file_path", "")),
+                    failed=a.get("success") == "false",
+                    source="raw",
+                )
+            )
+    return leaves
+
+
+def _parse_json_object(text: str) -> dict:
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def build_leaves(observations: list[dict], raw_records: list[dict] = ()) -> list[Leaf]:
+    """Turn Langfuse observations into leaves, marking failed tools and their blocked time.
+
+    Spans only the raw JSONL has (Langfuse was not receiving yet, or dropped them) are added
+    as `source="raw"` leaves; they carry no sub-agent attribution.
+    """
     by_id = {o["id"]: o for o in observations}
     failed = {o["parentObservationId"] for o in observations if o["level"] == "ERROR"}
     blocked: Counter[str] = Counter()
@@ -114,7 +166,8 @@ def build_leaves(observations: list[dict]) -> list[Leaf]:
                 blocked_s=blocked[o["id"]],
             )
         )
-    return leaves
+    seen = {_attr(o, "request_id") or _attr(o, "tool_use_id") for o in observations} - {None}
+    return leaves + _leaves_from_raw(list(raw_records), seen)
 
 
 def count_dispatches(observations: list[dict]) -> dict[str, int]:
@@ -131,8 +184,8 @@ def find_issue(observations, raw_records, repo, forced=None) -> int | None:
     """Return the issue number of a session, or None when it cannot be told.
 
     Order: the explicit override, then `vcs.ref.head.name` in the raw JSONL, then the
-    `<n>-<slug>` worktree directory in tool commands and file paths. The `repo` resource
-    attribute must match, so a session of another project is never joined.
+    `<n>-<slug>` worktree directory in tool commands and file paths (Langfuse or raw). The
+    `repo` resource attribute must match, so a session of another project is never joined.
     """
     if forced is not None:
         return forced
@@ -145,9 +198,10 @@ def find_issue(observations, raw_records, repo, forced=None) -> int | None:
             votes[int(m[1])] += 1
     if not votes:
         path_re = re.compile(rf"/workspaces/{re.escape(repo)}/(\d+)-[a-z]")
-        for o in observations:
-            for text in (_attr(o, "full_command", ""), _attr(o, "file_path", "")):
-                votes.update(int(m[1]) for m in path_re.finditer(text))
+        texts = [_attr(o, "full_command", "") + _attr(o, "file_path", "") for o in observations]
+        texts += [str(rec["attrs"].get("tool_input", "")) for rec in raw_records]
+        for text in texts:
+            votes.update(int(m[1]) for m in path_re.finditer(text))
     return votes.most_common(1)[0][0] if votes else None
 
 

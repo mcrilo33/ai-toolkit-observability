@@ -93,7 +93,9 @@ def comment(offset_s, body):
 def test_find_issue_follows_the_join_chain(vcs, paths, forced, expected, tool_input):
     observations = [make_obs("tool:Bash", 1, 2, full_command=p) for p in paths]
     raw = [{"name": "claude_code.tool_result", "attrs": {"vcs.ref.head.name": v}} for v in vcs]
-    raw += [{"name": "claude_code.tool_result", "attrs": {"tool_input": tool_input}}] * bool(tool_input)
+    raw += [{"name": "claude_code.tool_result", "attrs": {"tool_input": tool_input}}] * bool(
+        tool_input
+    )
 
     assert ev.find_issue(observations, raw, "ai-toolkit-observability", forced) == expected
 
@@ -461,11 +463,14 @@ def test_load_raw_reads_rotated_files_and_keeps_only_wanted_sessions(tmp_path):
         + "\n"
         + raw_line(SPOKE, "claude_code.api_request", {"model": "m"}, 2)
         + "\n"
+        + raw_line(SPOKE, "claude_code.user_prompt", {"prompt": "x"}, 3)
+        + "\n"
     )
 
     raw = ev.load_raw(tmp_path, {SPOKE})
 
     assert sorted(r["name"] for r in raw[SPOKE]) == [
+        "claude_code.api_request",
         "claude_code.hook_execution_complete",
         "claude_code.tool_result",
     ]

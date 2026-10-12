@@ -15,6 +15,7 @@ sources and drives the pipeline. The names the tests use are re-exported here.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import re
@@ -89,7 +90,11 @@ __all__ = [
 
 LANGFUSE_URL = "http://127.0.0.1:3000"
 KEYCHAIN_SERVICE = "ai-toolkit-langfuse-LANGFUSE_INIT_PROJECT_{}_KEY"
-RAW_EVENTS = {"claude_code.hook_execution_complete", "claude_code.tool_result"}
+RAW_EVENTS = {
+    "claude_code.hook_execution_complete",
+    "claude_code.tool_result",
+    "claude_code.api_request",
+}
 
 # --------------------------------------------------------------------------- loading
 
@@ -185,9 +190,20 @@ def load_issue(run, number: int) -> dict:
 # --------------------------------------------------------------------------- pipeline
 
 
+def _describe_gap_fill(filled: list) -> str:
+    clock = lambda t: dt.datetime.fromtimestamp(t, dt.UTC).strftime("%H:%M:%S")  # noqa: E731
+    llm = [lf for lf in filled if lf.kind == "llm"]
+    return (
+        f"gap-filled from the raw JSONL (Langfuse had no span for them): {len(llm)} LLM "
+        f"request(s) costing {sum(lf.cost for lf in llm):.2f} USD and {len(filled) - len(llm)} "
+        f"tool call(s), {clock(min(lf.start for lf in filled))} to "
+        f"{clock(max(lf.end for lf in filled))} UTC; they have no sub-agent attribution"
+    )
+
+
 def analyse_session(session, observations, raw, issue, commits, run) -> SessionReport:
     """Build the report of one session from its observations, raw records, issue and commits."""
-    leaves = build_leaves(observations)
+    leaves = build_leaves(observations, raw)
     life = parse_lifecycle(issue["comments"]) if issue else Lifecycle()
     stepper = Stepper(leaves, life, commits)
     counts = count_dispatches(observations)
@@ -198,6 +214,8 @@ def analyse_session(session, observations, raw, issue, commits, run) -> SessionR
             "raw JSONL missing for this session (rotated away?): hooks and the branch "
             "name are unavailable; cost, tools, agents and rules come from Langfuse"
         )
+    if filled := [lf for lf in leaves if lf.source == "raw"]:
+        notes.append(_describe_gap_fill(filled))
     if issue and not life.gate_answered_at:
         notes.append("no gate-answer comment: the plan step is empty")
     if issue and counts["redispatches"] != life.blocked_count:

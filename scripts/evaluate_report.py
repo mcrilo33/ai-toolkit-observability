@@ -202,9 +202,7 @@ def _fold(
                 row[k] += stats[k]
             for k in lists:
                 row[k].extend(stats[k])
-            row["by_step"][step] += stats[sums[0]] + (
-                stats["tool_calls"] if "tool_calls" in stats else 0
-            )
+            row["by_step"][step] += stats[sums[0]] + stats.get("tool_calls", 0)
     return rows
 
 

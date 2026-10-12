@@ -1,6 +1,7 @@
 import datetime as dt
 import importlib.util
 import itertools
+import sys
 
 import pytest
 
@@ -8,6 +9,7 @@ from conftest import REPO
 
 _spec = importlib.util.spec_from_file_location("evaluate", REPO / "scripts" / "evaluate.py")
 ev = importlib.util.module_from_spec(_spec)
+sys.modules["evaluate"] = ev
 _spec.loader.exec_module(ev)
 
 T0 = dt.datetime(2026, 10, 6, 14, 52, tzinfo=dt.timezone.utc).timestamp()

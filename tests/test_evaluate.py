@@ -1,6 +1,7 @@
 import datetime as dt
 import itertools
 import json
+import subprocess
 import urllib.error
 
 import evaluate as ev
@@ -281,6 +282,12 @@ def test_attribute_counts_agents_tools_hooks_and_rules_per_step():
         ),
         make_obs("tool:Bash", 7, 8, full_command="ls .ai-toolkit/rules/; cat README.md"),
         make_obs(
+            "tool:Bash",
+            9,
+            10,
+            full_command="cat .ai-toolkit/rules/a.md .ai-toolkit/rules/b.md && gh issue view 2",
+        ),
+        make_obs(
             "tool:Bash", 8, 9, full_command='git commit -m "cat .ai-toolkit/rules/issue-hygiene.md"'
         ),
         *[make_obs("tool:Bash", 10 + i, 10 + i + d) for i, d in enumerate([1, 2, 3, 4, 10])],
@@ -300,10 +307,10 @@ def test_attribute_counts_agents_tools_hooks_and_rules_per_step():
     assert stats.agents[("review", "code-review")]["cost_usd"] == pytest.approx(0.4)
     assert stats.agents[("plan", "main")]["calls"] == 1
     bash = stats.tools[("plan", "Bash")]
-    assert (bash["calls"], bash["failures"]) == (9, 1)
+    assert (bash["calls"], bash["failures"]) == (10, 1)
     assert ev.percentile(bash["durations"], 90) == 10
     assert stats.hooks[("plan", "PreToolUse:Bash")] == {"runs": 2, "total_ms": 100.0, "blocking": 1}
-    assert dict(stats.rules) == {"bug-triage": 1, "workflow": 1}
+    assert dict(stats.rules) == {"bug-triage": 1, "workflow": 1, "a": 1, "b": 1}
 
 
 def test_measure_rule_sizes_marks_path_scoped_rules(tmp_path):
@@ -495,8 +502,8 @@ def test_fetch_observations_follows_the_cursor():
         seen.append(path)
         return pages["c1" if "cursor=c1" in path else None]
 
-    assert [o["id"] for o in ev.fetch_observations(http, since="2026-10-01")] == ["a", "b"]
-    assert "fromStartTime=2026-10-01" in seen[0]
+    assert [o["id"] for o in ev.fetch_observations(http)] == ["a", "b"]
+    assert "fromStartTime" not in seen[0]
 
 
 class World:
@@ -595,6 +602,7 @@ def test_main_reports_one_session_and_a_rerun_posts_the_same_score_ids(tmp_path,
     out = capsys.readouterr().out
     assert "landed=true" in out and "review_rounds=1" in out and "gate_lane=plan" in out
     assert "gap-filled from the raw JSONL" in out and "1 LLM request" in out
+    assert "raw JSONL covers only" in out
     assert "PreToolUse:Bash" in out and "bug-triage" in out and "Zero-use rules: workflow" in out
     assert len(first) == 16 and world.posted_ids() == sorted(first * 2)
     assert World.KEY not in out and not any(World.KEY in " ".join(a) for a in world.run_calls)
@@ -618,3 +626,90 @@ def test_main_with_the_stack_down_fails_clearly_and_posts_nothing(tmp_path, caps
 
     assert "not reachable" in capsys.readouterr().err
     assert world.posted_ids() == []
+
+
+def test_load_credentials_asks_the_keychain_by_service_name_only():
+    calls = []
+
+    def run(args):
+        calls.append(args)
+        return World.KEY + "\n"
+
+    assert ev.load_credentials(run) == (World.KEY, World.KEY)
+    assert all(a[:3] == ["security", "find-generic-password", "-a"] for a in calls)
+    assert not any(World.KEY in " ".join(a) for a in calls)
+
+
+def test_load_credentials_names_the_missing_item_not_the_key():
+    def run(args):
+        raise subprocess.CalledProcessError(44, args, output=World.KEY, stderr="not found")
+
+    with pytest.raises(ev.EvalError, match="LANGFUSE_INIT_PROJECT_PUBLIC_KEY") as exc:
+        ev.load_credentials(run)
+    assert World.KEY not in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "window,scored",
+    [
+        pytest.param(["--since", "2026-10-06T14:55:00Z"], False, id="started-before-since"),
+        pytest.param(["--until", "2026-10-06T14:53:00Z"], True, id="started-before-until"),
+        pytest.param(["--since", "2026-10-06T14:00:00+02:00"], True, id="offset-is-honoured"),
+    ],
+)
+def test_main_window_selects_sessions_and_never_clips_their_spans(tmp_path, window, scored):
+    world = World(tmp_path)
+
+    assert world.main(*window) == 0
+
+    assert len(world.posted_ids()) == (16 if scored else 0)
+    assert not any("fromStartTime" in c[1] or "toStartTime" in c[1] for c in world.http_calls)
+
+
+def test_main_rejects_a_window_it_cannot_parse(tmp_path, capsys):
+    world = World(tmp_path)
+
+    assert world.main("--since", "yesterday") == 2
+
+    assert "--since" in capsys.readouterr().err
+    assert world.posted_ids() == []
+
+
+@pytest.mark.parametrize(
+    "extra,posted",
+    [
+        pytest.param([], 0, id="other-repo-skipped"),
+        pytest.param(["--session", SPOKE, "--issue", "1"], 16, id="forced-session-bypasses-repo"),
+    ],
+)
+def test_main_repo_filter_yields_to_an_explicit_session(tmp_path, extra, posted):
+    world = World(tmp_path)
+    for o in world.observations:
+        o["metadata"]["repo"] = "some-other-repo"
+
+    assert world.main(*extra) == 0
+
+    assert len(world.posted_ids()) == posted
+
+
+def test_main_turns_a_failing_gh_into_a_clear_error_and_posts_nothing(tmp_path, capsys):
+    world = World(tmp_path)
+    original = world.run
+
+    def failing(args):
+        if args[:3] == ["gh", "issue", "view"]:
+            raise subprocess.CalledProcessError(1, args, stderr="HTTP 401: bad credentials")
+        return original(args)
+
+    assert ev.main(["--raw-dir", str(world.raw_dir)], http=world.http, run=failing) == 2
+
+    assert "bad credentials" in capsys.readouterr().err
+    assert world.posted_ids() == []
+
+
+def test_load_raw_survives_a_record_without_optional_otlp_fields(tmp_path):
+    bare = {"resourceLogs": [{"resource": {}, "scopeLogs": [{"logRecords": [{"body": {}}]}]}]}
+    line = json.dumps(bare).replace("{}", '{"stringValue": "x"}', 0)
+    (tmp_path / "logs.jsonl").write_text(line + "\n" + f'{{"spoke_run_id":"{SPOKE}"}}\n')
+
+    assert ev.load_raw(tmp_path, {SPOKE}) == {}

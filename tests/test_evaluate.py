@@ -104,8 +104,9 @@ def test_find_issue_follows_the_join_chain(vcs, paths, forced, expected, tool_in
 def test_find_issue_ignores_a_session_of_another_repo():
     observations = [make_obs("tool:Bash", 1, 2, full_command="/w/workspaces/ai-toolkit/2-feat-x/a")]
     observations[0]["metadata"]["repo"] = "ai-toolkit"
+    branch = {"name": "claude_code.tool_result", "attrs": {"vcs.ref.head.name": "2-feat-x"}}
 
-    assert ev.find_issue(observations, [], "ai-toolkit-observability", None) is None
+    assert ev.find_issue(observations, [branch], "ai-toolkit-observability", None) is None
 
 
 def test_parse_lifecycle_reads_waits_gate_and_landing_from_comments():
@@ -114,7 +115,9 @@ def test_parse_lifecycle_reads_waits_gate_and_landing_from_comments():
         comment(300, "A permission request needs a human (message msg_a, tool: Bash). Reply"),
         comment(1000, "A permission request needs a human (message msg_b, tool: Write). Reply"),
         comment(1100, "Permission answered by the human: allow (tool: Write)"),
+        comment(1200, "Permission answered by the human: allow (tool: Edit)"),
         comment(2000, "A gate question needs a human (message msg_c), human: stuck. Reply"),
+        comment(2600, "A gate question needs a human (message msg_d), human: stuck again. Reply"),
         comment(3700, "blocked: worker_done failed: AC6 is NOT met"),
         comment(5000, "landed in 974fa117e6ac32bd436749dad21f2e3654930daf"),
     ]
@@ -127,7 +130,7 @@ def test_parse_lifecycle_reads_waits_gate_and_landing_from_comments():
     waits = [(w.kind, w.start - T0, w.end - T0, w.answered) for w in life.waits]
     assert ("permission", 1000, 1100, True) in waits
     assert ("gate", 2000, 3700, False) in waits
-    assert not any(w[1] == 300 for w in waits)
+    assert not any(w[1] == 300 or w[2] == 1200 for w in waits)
 
 
 def build_account(leaves, comments, commits=()):
@@ -220,6 +223,35 @@ def test_is_landed_trusts_the_comment_and_checks_git_when_it_can():
     assert ev.is_landed(life, run) is True
     assert calls[0][:2] == ["git", "merge-base"]
     assert ev.is_landed(ev.parse_lifecycle([]), run) is False
+
+
+@pytest.mark.parametrize(
+    "exit_code,landed",
+    [pytest.param(1, False, id="not-an-ancestor"), pytest.param(128, True, id="sha-unknown")],
+)
+def test_is_landed_lets_git_contradict_the_comment_only_when_it_knows_the_sha(exit_code, landed):
+    def run(args):
+        raise subprocess.CalledProcessError(exit_code, args)
+
+    assert ev.is_landed(ev.parse_lifecycle([comment(10, "landed in abc1234")]), run) is landed
+
+
+def test_load_commits_keeps_only_this_issue_in_time_order():
+    log = f"{int(T0 + 20)}\tfeat(x): b (#2)\n{int(T0 + 5)}\ttest: a (#2)\n"
+    log += f"{int(T0 + 9)}\tfeat: other (#20)\n{int(T0 + 7)}\tMerge branch (#2)\n"
+
+    commits = ev.load_commits(lambda args: log, 2)
+
+    assert [(c.kind, c.ts - T0) for c in commits] == [("test", 5), ("feat", 20)]
+
+
+def test_build_leaves_keeps_the_cost_of_a_generation_without_an_end_time():
+    gen = make_obs("claude_code.llm_request", 5, 6, type_="GENERATION", cost=0.3)
+    gen["endTime"] = None
+
+    (leaf,) = ev.build_leaves([gen])
+
+    assert (leaf.cost, leaf.end - leaf.start) == (0.3, 0)
 
 
 def raw_api_request(offset, request_id, cost, duration_ms):
@@ -354,8 +386,14 @@ def make_report(**kw):
 
 def test_build_scores_is_idempotent_and_typed():
     first, second = ev.build_scores(make_report()), ev.build_scores(make_report())
+    changed = make_report(review_rounds=9, landed=False)
+    changed.accounting.steps["plan"].cost_usd = 5.0
 
     assert first == second
+    assert [s["id"] for s in ev.build_scores(changed)] == [s["id"] for s in first]
+    assert not {s["id"] for s in ev.build_scores(make_report(session="other"))} & {
+        s["id"] for s in first
+    }
     by_name = {s["name"]: s for s in first}
     assert len({s["id"] for s in first}) == len(first)
     assert (by_name["landed"]["dataType"], by_name["landed"]["value"]) == ("BOOLEAN", 1)
@@ -416,6 +454,7 @@ def test_publish_scores_with_the_stack_down_pushes_nothing():
 def test_make_http_wraps_failures_without_leaking_the_key(failure, message):
     def fake_open(request, timeout):
         assert request.get_header("Authorization").startswith("Basic ")
+        assert "Authorization" not in request.headers  # never copied to a redirect target
         raise failure
 
     http = ev.make_http("http://127.0.0.1:3000", "pk-lf-x", "sk-lf-secret", fake_open)

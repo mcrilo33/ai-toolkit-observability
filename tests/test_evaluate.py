@@ -314,6 +314,9 @@ def test_attribute_counts_agents_tools_hooks_and_rules_per_step():
         ),
         make_obs("tool:Bash", 7, 8, full_command="ls .ai-toolkit/rules/; cat README.md"),
         make_obs(
+            "tool:Bash", 8, 9, full_command='git commit -m "docs: x; cat .ai-toolkit/rules/c.md"'
+        ),
+        make_obs(
             "tool:Bash",
             9,
             10,
@@ -520,9 +523,15 @@ def test_load_raw_reads_rotated_files_and_keeps_only_wanted_sessions(tmp_path):
         + "\n"
     )
 
+    batch = json.loads(raw_line("other-session", "claude_code.user_prompt", {}, 8))
+    late = json.loads(raw_line(SPOKE, "claude_code.api_request", {}, 9))  # no record-level id
+    batch["resourceLogs"] += late["resourceLogs"]
+    (tmp_path / "logs-batched.jsonl").write_text(json.dumps(batch) + "\n")
+
     raw = ev.load_raw(tmp_path, {SPOKE})
 
     assert sorted(r["name"] for r in raw[SPOKE]) == [
+        "claude_code.api_request",
         "claude_code.api_request",
         "claude_code.hook_execution_complete",
         "claude_code.tool_result",

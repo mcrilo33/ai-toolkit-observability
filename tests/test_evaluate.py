@@ -166,3 +166,138 @@ def test_is_landed_trusts_the_comment_and_checks_git_when_it_can():
     assert ev.is_landed(life, run) is True
     assert calls[0][:2] == ["git", "merge-base"]
     assert ev.is_landed(ev.parse_lifecycle([]), run) is False
+
+
+def run_attribution(leaves, raw, comments=(), commits=()):
+    life = ev.parse_lifecycle(list(comments))
+    return ev.attribute(leaves, raw, ev.Stepper(leaves, life, list(commits)))
+
+
+def hook_record(offset, name, ms, blocking="0"):
+    return {"t": T0 + offset, "name": "claude_code.hook_execution_complete",
+            "attrs": {"hook_name": name, "total_duration_ms": str(ms), "num_blocking": blocking}}
+
+
+def test_attribute_counts_agents_tools_hooks_and_rules_per_step():
+    review = make_obs("sub-agent:code-review", 500, 500.01)
+    observations = [
+        make_obs("sub-agent:llm", 500, 510, type_="GENERATION", parent=review["id"], cost=0.4),
+        make_obs("claude_code.llm_request", 0, 5, type_="GENERATION", cost=0.1),
+        review,
+        make_obs("tool:Read", 1, 2, file_path="/w/.ai-toolkit/rules/bug-triage.md"),
+        make_obs("tool:Read", 3, 4, file_path="/w/README.md"),
+        *[make_obs("tool:Bash", 10 + i, 10 + i + d) for i, d in enumerate([1, 2, 3, 4, 10])],
+    ]
+    failing = make_obs("tool:Bash", 30, 31)
+    observations += [failing, make_obs("claude_code.tool.execution", 30, 31, parent=failing["id"], level="ERROR")]
+    raw = [hook_record(1, "PreToolUse:Bash", 40), hook_record(2, "PreToolUse:Bash", 60, blocking="1")]
+
+    stats = run_attribution(ev.build_leaves(observations), raw, [comment(1000, "Gate answered")])
+
+    assert stats.agents[("review", "code-review")]["cost_usd"] == pytest.approx(0.4)
+    assert stats.agents[("plan", "main")]["calls"] == 1
+    bash = stats.tools[("plan", "Bash")]
+    assert (bash["calls"], bash["failures"]) == (6, 1)
+    assert ev.percentile(bash["durations"], 90) == 10
+    assert stats.hooks[("plan", "PreToolUse:Bash")] == {"runs": 2, "total_ms": 100.0, "blocking": 1}
+    assert dict(stats.rules) == {"bug-triage": 1}
+
+
+def test_measure_rule_sizes_marks_path_scoped_rules(tmp_path):
+    (tmp_path / "a.md").write_text("x" * 400)
+    (tmp_path / "b.md").write_text("---\npaths:\n  - '**/*.py'\n---\n" + "y" * 80)
+
+    sizes = {r.name: r for r in ev.measure_rule_sizes(tmp_path)}
+
+    assert (sizes["a"].tokens, sizes["a"].scoped) == (100, False)
+    assert sizes["b"].scoped is True
+
+
+def test_list_unused_rules_lists_rule_files_never_read(tmp_path):
+    (tmp_path / "bug-triage.md").write_text("x")
+    (tmp_path / "workflow.md").write_text("x")
+
+    assert ev.list_unused_rules(tmp_path, {"bug-triage": 3}) == ["workflow"]
+
+
+def make_report(**kw):
+    acct = ev.Accounting({s: ev.StepTime() for s in ev.STEPS}, {"red": 0.0, "green": 0.0, "refactor": 0.0, "other": 0.0})
+    acct.steps["implement"].active_s = 60.0
+    base = dict(session=SPOKE, issue=1, title="t", gate_lane="plan", landed=True, review_rounds=2,
+                redispatches=1, accounting=acct, attribution=ev.Attribution(), notes=[], labels=[])
+    return ev.SessionReport(**{**base, **kw})
+
+
+def test_build_scores_is_idempotent_and_typed():
+    first, second = ev.build_scores(make_report()), ev.build_scores(make_report())
+
+    assert first == second
+    by_name = {s["name"]: s for s in first}
+    assert len({s["id"] for s in first}) == len(first)
+    assert (by_name["landed"]["dataType"], by_name["landed"]["value"]) == ("BOOLEAN", 1)
+    assert (by_name["gate_lane"]["dataType"], by_name["gate_lane"]["value"]) == ("CATEGORICAL", "plan")
+    assert by_name["step_implement_active_s"]["value"] == 60.0
+    assert {"cost_usd_total", "duration_active_s", "waiting_s", "review_rounds", "redispatches"} <= set(by_name)
+    assert all(s["sessionId"] == SPOKE for s in first)
+
+
+class FakeHttp:
+    def __init__(self, down=False):
+        self.calls, self.down = [], down
+
+    def __call__(self, method, path, body=None):
+        self.calls.append((method, path, body))
+        if self.down:
+            raise ev.EvalError("Langfuse is not reachable at http://127.0.0.1:3000; run scripts/langfuse.sh up")
+        return {"id": body["id"]} if body else {"status": "OK"}
+
+
+def test_publish_scores_posts_every_score_after_a_health_check():
+    http = FakeHttp()
+
+    ev.publish_scores(http, ev.build_scores(make_report()))
+
+    assert http.calls[0][:2] == ("GET", "/api/public/health")
+    assert {c[0] for c in http.calls[1:]} == {"POST"}
+    assert len(http.calls) > 5
+
+
+def test_publish_scores_with_the_stack_down_pushes_nothing():
+    http = FakeHttp(down=True)
+
+    with pytest.raises(ev.EvalError, match="not reachable"):
+        ev.publish_scores(http, ev.build_scores(make_report()))
+
+    assert [c[0] for c in http.calls] == ["GET"]
+
+
+@pytest.mark.parametrize(
+    "failure,message",
+    [
+        pytest.param(OSError("refused"), "not reachable", id="connection-refused"),
+        pytest.param(ev.urllib.error.HTTPError("u", 401, "no", {}, None), "HTTP 401", id="http-error"),
+    ],
+)
+def test_make_http_wraps_failures_without_leaking_the_key(failure, message):
+    def fake_open(request, timeout):
+        assert request.get_header("Authorization").startswith("Basic ")
+        raise failure
+
+    http = ev.make_http("http://127.0.0.1:3000", "pk-lf-x", "sk-lf-secret", fake_open)
+
+    with pytest.raises(ev.EvalError, match=message) as exc:
+        http("GET", "/api/public/health")
+    assert "sk-lf-secret" not in str(exc.value)
+
+
+def test_render_report_has_the_four_component_tables_and_the_zero_use_list():
+    rep = make_report(notes=["raw JSONL rotated away: hooks and branch name unavailable"])
+    rep.attribution.rules["bug-triage"] = 2
+    agg = ev.aggregate([rep], unused_rules=["workflow"], rule_sizes=[ev.RuleSize("guidelines", 400, 100, False)])
+
+    text = ev.render_report([rep], agg)
+
+    for heading in ("Agents", "Tools", "Hooks", "On-demand rules", "Zero-use rules: workflow", "cost only - usefulness not measurable here"):
+        assert heading in text
+    assert "raw JSONL rotated away" in text
+    assert "landed=true" in text and "review_rounds=2" in text

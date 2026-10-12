@@ -50,6 +50,7 @@ from evaluate_time import (
     StepTime,
     account_time,
     build_leaves,
+    count_claude_sessions,
     count_dispatches,
     find_issue,
     is_landed,
@@ -74,6 +75,7 @@ __all__ = [
     "attribute",
     "build_leaves",
     "build_scores",
+    "count_claude_sessions",
     "count_dispatches",
     "fetch_observations",
     "find_issue",
@@ -263,9 +265,10 @@ def analyse_session(session, observations, raw, issue, commits, run) -> SessionR
         )
     if issue and not life.gate_answered_at:
         notes.append("no gate-answer comment: the plan step is empty")
-    if issue and counts["redispatches"] != life.blocked_count:
+    in_telemetry = max(count_claude_sessions(observations, raw) - 1, 0)
+    if issue and in_telemetry != life.blocked_count:
         notes.append(
-            f"{counts['redispatches']} re-dispatch(es) in telemetry vs "
+            f"{in_telemetry} re-dispatch(es) in telemetry vs "
             f"{life.blocked_count} blocked comment(s)"
         )
     if not issue:

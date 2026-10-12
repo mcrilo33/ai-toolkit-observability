@@ -170,15 +170,22 @@ def build_leaves(observations: list[dict], raw_records: list[dict] = ()) -> list
     return leaves + _leaves_from_raw(list(raw_records), seen)
 
 
+def count_claude_sessions(observations: list[dict], raw_records: list[dict]) -> int:
+    """Count the distinct Claude session ids seen in Langfuse and the raw JSONL."""
+    sessions = {_attr(o, "session.id") for o in observations}
+    sessions |= {rec["attrs"].get("session.id") for rec in raw_records}
+    return len(sessions - {None, ""})
+
+
 def count_dispatches(
     observations: list[dict], raw_records: list[dict], life: "Lifecycle"
 ) -> dict[str, int]:
     """Count in-spoke review rounds and re-dispatches from every source that has them.
 
-    Langfuse and the raw JSONL describe the same events, so each count takes the larger of the
-    two (a span either side is missing never lowers it). Review rounds are `code-review` agent
-    spans / Agent tool results; re-dispatches are extra Claude session ids, or the coordinator's
-    `blocked:` comments when those are more.
+    Langfuse and the raw JSONL describe the same events, so review rounds take the larger of
+    the two (a span either side is missing never lowers it): `code-review` agent spans or Agent
+    tool results. Re-dispatches are extra Claude session ids, or the coordinator's `blocked:`
+    comments when those are more.
     """
     reviews = sum(1 for o in observations if o["name"] == "sub-agent:code-review")
     raw_reviews = sum(
@@ -189,12 +196,10 @@ def count_dispatches(
         and _parse_json_object(rec["attrs"].get("tool_parameters", "")).get("subagent_type")
         == "code-review"
     )
-    sessions = {_attr(o, "session.id") for o in observations}
-    sessions |= {rec["attrs"].get("session.id") for rec in raw_records}
-    sessions -= {None, ""}
+    sessions = count_claude_sessions(observations, raw_records)
     return {
         "review_rounds": max(reviews, raw_reviews),
-        "redispatches": max(len(sessions) - 1, life.blocked_count, 0),
+        "redispatches": max(sessions - 1, life.blocked_count, 0),
     }
 
 

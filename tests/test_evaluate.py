@@ -276,6 +276,13 @@ def test_attribute_counts_agents_tools_hooks_and_rules_per_step():
         review,
         make_obs("tool:Read", 1, 2, file_path="/w/.ai-toolkit/rules/bug-triage.md"),
         make_obs("tool:Read", 3, 4, file_path="/w/README.md"),
+        make_obs(
+            "tool:Bash", 5, 6, full_command="sed -n 1,60p .ai-toolkit/rules/workflow.md | cut -c1-9"
+        ),
+        make_obs("tool:Bash", 7, 8, full_command="ls .ai-toolkit/rules/; cat README.md"),
+        make_obs(
+            "tool:Bash", 8, 9, full_command='git commit -m "cat .ai-toolkit/rules/issue-hygiene.md"'
+        ),
         *[make_obs("tool:Bash", 10 + i, 10 + i + d) for i, d in enumerate([1, 2, 3, 4, 10])],
     ]
     failing = make_obs("tool:Bash", 30, 31)
@@ -293,10 +300,10 @@ def test_attribute_counts_agents_tools_hooks_and_rules_per_step():
     assert stats.agents[("review", "code-review")]["cost_usd"] == pytest.approx(0.4)
     assert stats.agents[("plan", "main")]["calls"] == 1
     bash = stats.tools[("plan", "Bash")]
-    assert (bash["calls"], bash["failures"]) == (6, 1)
+    assert (bash["calls"], bash["failures"]) == (9, 1)
     assert ev.percentile(bash["durations"], 90) == 10
     assert stats.hooks[("plan", "PreToolUse:Bash")] == {"runs": 2, "total_ms": 100.0, "blocking": 1}
-    assert dict(stats.rules) == {"bug-triage": 1}
+    assert dict(stats.rules) == {"bug-triage": 1, "workflow": 1}
 
 
 def test_measure_rule_sizes_marks_path_scoped_rules(tmp_path):

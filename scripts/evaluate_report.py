@@ -16,6 +16,11 @@ from pathlib import Path
 from evaluate_time import STEPS, Accounting, EvalError, Leaf, Stepper, StepTime
 
 ON_DEMAND_RULE = re.compile(r"\.ai-toolkit/rules/([\w-]+)\.md$")
+# Workers load rules with Bash far more often than with Read: cat/sed/head/grep on the file.
+BASH_RULE_READ = re.compile(
+    r"\b(?:cat|sed|head|tail|grep|rg|less|bat|awk|nl)\b[^|;&\n]*?\.ai-toolkit/rules/([\w-]+)\.md"
+)
+NOT_A_READ = ("git commit", "gh issue", "gh pr", "orca orchestration")
 
 
 def percentile(values: list[float], q: int) -> float:
@@ -63,6 +68,8 @@ def attribute(leaves: list[Leaf], raw_records: list[dict], stepper: Stepper) -> 
             tool["durations"].append(leaf.end - leaf.start - leaf.blocked_s)
             if leaf.name == "Read" and (m := ON_DEMAND_RULE.search(leaf.file_path)):
                 out.rules[m[1]] += 1
+            elif leaf.name == "Bash" and not any(x in leaf.command for x in NOT_A_READ):
+                out.rules.update(set(BASH_RULE_READ.findall(leaf.command)))
     for rec in raw_records:
         if rec["name"] != "claude_code.hook_execution_complete":
             continue

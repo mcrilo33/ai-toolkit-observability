@@ -243,7 +243,7 @@ def analyse_session(session, observations, raw, issue, commits, run) -> SessionR
     leaves = build_leaves(observations, raw)
     life = parse_lifecycle(issue["comments"]) if issue else Lifecycle()
     stepper = Stepper(leaves, life, commits)
-    counts = count_dispatches(observations)
+    counts = count_dispatches(observations, raw, life)
     footer = re.search(r"(?m)^Gate:\s*(\S+)", issue["body"]) if issue else None
     notes = []
     if not raw:
@@ -251,10 +251,16 @@ def analyse_session(session, observations, raw, issue, commits, run) -> SessionR
             "raw JSONL missing for this session (rotated away?): hooks and the branch "
             "name are unavailable; cost, tools, agents and rules come from Langfuse"
         )
-    if filled := [lf for lf in leaves if lf.source == "raw"]:
+    filled = [lf for lf in leaves if lf.source == "raw"]
+    if filled:
         notes.append(_describe_gap_fill(filled))
-    if note := _describe_partial_raw(raw, leaves):
-        notes.append(note)
+    if partial := _describe_partial_raw(raw, leaves):
+        notes.append(partial)
+    if not raw or filled or partial:
+        notes.append(
+            "review_rounds and redispatches are lower bounds: they count only the spans and "
+            "sessions that Langfuse or the raw JSONL still have"
+        )
     if issue and not life.gate_answered_at:
         notes.append("no gate-answer comment: the plan step is empty")
     if issue and counts["redispatches"] != life.blocked_count:

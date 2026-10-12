@@ -170,11 +170,32 @@ def build_leaves(observations: list[dict], raw_records: list[dict] = ()) -> list
     return leaves + _leaves_from_raw(list(raw_records), seen)
 
 
-def count_dispatches(observations: list[dict]) -> dict[str, int]:
-    """Count in-spoke review rounds and re-dispatches (extra Claude sessions) from telemetry."""
-    sessions = {_attr(o, "session.id") for o in observations} - {None}
+def count_dispatches(
+    observations: list[dict], raw_records: list[dict], life: "Lifecycle"
+) -> dict[str, int]:
+    """Count in-spoke review rounds and re-dispatches from every source that has them.
+
+    Langfuse and the raw JSONL describe the same events, so each count takes the larger of the
+    two (a span either side is missing never lowers it). Review rounds are `code-review` agent
+    spans / Agent tool results; re-dispatches are extra Claude session ids, or the coordinator's
+    `blocked:` comments when those are more.
+    """
     reviews = sum(1 for o in observations if o["name"] == "sub-agent:code-review")
-    return {"review_rounds": reviews, "redispatches": max(len(sessions) - 1, 0)}
+    raw_reviews = sum(
+        1
+        for rec in raw_records
+        if rec["name"] == "claude_code.tool_result"
+        and rec["attrs"].get("tool_name") == "Agent"
+        and _parse_json_object(rec["attrs"].get("tool_parameters", "")).get("subagent_type")
+        == "code-review"
+    )
+    sessions = {_attr(o, "session.id") for o in observations}
+    sessions |= {rec["attrs"].get("session.id") for rec in raw_records}
+    sessions -= {None, ""}
+    return {
+        "review_rounds": max(reviews, raw_reviews),
+        "redispatches": max(len(sessions) - 1, life.blocked_count, 0),
+    }
 
 
 # --------------------------------------------------------------------------- join

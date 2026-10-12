@@ -90,8 +90,8 @@ token-size table of the always-on rules (cost only, usefulness is not measurable
 | `gate_lane`, labels | `gh issue view`: the `Gate:` footer | |
 | Gate answer, permission/gate waits, `blocked:`, `landed in` | `gh` issue comments written by the coordinator loop | Timestamps drive the segmentation |
 | `landed` | The `landed in <sha>` comment, checked with `git merge-base --is-ancestor` | An unknown SHA leaves the comment as evidence |
-| `review_rounds` | Count of `sub-agent:code-review` spans | Comments and commits carry no review marker |
-| `redispatches` | Distinct Claude `session.id` in one `spoke_run_id`, minus one | Cross-checked with `blocked:` comments |
+| `review_rounds` | `sub-agent:code-review` spans, or raw `Agent` tool results with `subagent_type` `code-review`; the larger count | Comments and commits carry no review marker; a lower bound when telemetry is incomplete |
+| `redispatches` | Distinct Claude `session.id` in Langfuse and the raw JSONL, minus one, or the `blocked:` comment count if larger | A lower bound when telemetry is incomplete |
 | On-demand rule loads | `Read` of `.ai-toolkit/rules/<name>.md`, or a Bash `cat`/`sed`/`head`/`grep` of it | Workers use Bash, so both count |
 | Always-on rule size | Files in `.claude/rules/ai-toolkit/` | `characters / 4`; `paths:` frontmatter marks a rule path-scoped |
 
@@ -119,6 +119,7 @@ carrying `#<n>` (`test`, `feat`/`fix`, `refactor`; anything else is `other`).
 - Langfuse has no span from before the collector exported to it. Those spans are filled from
   the raw JSONL, which has no sub-agent attribution, and the report lists them. When the raw
   file has rotated away too, the session keeps its trace-level numbers and says what is missing.
+- `review_rounds` and `redispatches` are lower bounds whenever Langfuse or the raw JSONL lacks part of the session; the report says so in a note.
 - `vcs.ref.head.name` is on a handful of events, so the issue join leans on the worktree path;
   a session that never touched it needs `--issue`.
 - `--since`/`--until` pick whole sessions by their first span; a session is always scored from all its spans.

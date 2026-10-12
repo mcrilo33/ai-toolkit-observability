@@ -55,15 +55,26 @@ def comment(offset_s, body):
 
 
 @pytest.mark.parametrize(
-    "vcs,paths,forced,expected",
+    "vcs,paths,forced,expected,tool_input",
     [
-        pytest.param(["1-feat-self-hosted-langfuse-v4-stack-on-lo"], [], None, 1, id="vcs-name"),
+        pytest.param(
+            ["1-feat-self-hosted-langfuse-v4-stack-on-lo"], [], None, 1, "", id="vcs-name"
+        ),
         pytest.param(
             [],
             ["cd /w/orca/workspaces/ai-toolkit-observability/2-feat-eval; ls"],
             None,
             2,
+            "",
             id="worktree-path",
+        ),
+        pytest.param(
+            [],
+            [],
+            None,
+            1,
+            '{"file_path":"/w/orca/workspaces/ai-toolkit-observability/1-feat-x/.ai-toolkit/task.md"}',
+            id="worktree-path-in-raw-tool-input",
         ),
         pytest.param(
             [],
@@ -73,14 +84,16 @@ def comment(offset_s, body):
             ],
             7,
             7,
+            "",
             id="forced-wins",
         ),
-        pytest.param([], ["no path here"], None, None, id="unknown"),
+        pytest.param([], ["no path here"], None, None, "", id="unknown"),
     ],
 )
-def test_find_issue_follows_the_join_chain(vcs, paths, forced, expected):
+def test_find_issue_follows_the_join_chain(vcs, paths, forced, expected, tool_input):
     observations = [make_obs("tool:Bash", 1, 2, full_command=p) for p in paths]
     raw = [{"name": "claude_code.tool_result", "attrs": {"vcs.ref.head.name": v}} for v in vcs]
+    raw += [{"name": "claude_code.tool_result", "attrs": {"tool_input": tool_input}}] * bool(tool_input)
 
     assert ev.find_issue(observations, raw, "ai-toolkit-observability", forced) == expected
 
@@ -204,6 +217,40 @@ def test_is_landed_trusts_the_comment_and_checks_git_when_it_can():
     assert ev.is_landed(life, run) is True
     assert calls[0][:2] == ["git", "merge-base"]
     assert ev.is_landed(ev.parse_lifecycle([]), run) is False
+
+
+def raw_api_request(offset, request_id, cost, duration_ms):
+    attrs = {"request_id": request_id, "cost_usd": cost, "duration_ms": str(duration_ms)}
+    attrs |= {"input_tokens": "100", "output_tokens": "10", "session.id": CLAUDE_A}
+    return {"t": T0 + offset, "name": "claude_code.api_request", "attrs": attrs}
+
+
+def raw_tool_result(offset, tool_use_id, tool, tool_input="{}", duration_ms=4):
+    attrs = {"tool_use_id": tool_use_id, "tool_name": tool, "tool_input": tool_input}
+    attrs |= {"duration_ms": str(duration_ms), "success": "true", "session.id": CLAUDE_A}
+    return {"t": T0 + offset, "name": "claude_code.tool_result", "attrs": attrs}
+
+
+def test_build_leaves_fills_spans_langfuse_never_received_from_raw_without_duplicates():
+    seen_llm = make_obs(
+        "claude_code.llm_request", 100, 110, type_="GENERATION", cost=0.5, request_id="req_seen"
+    )
+    seen_tool = make_obs("tool:Bash", 120, 121, tool_use_id="toolu_seen")
+    rule = '{"file_path":"/w/.ai-toolkit/rules/workflow.md"}'
+    raw = [
+        raw_api_request(10, "req_seen", 0.01, 2000),
+        raw_api_request(20, "req_new", 0.25, 3000),
+        raw_tool_result(5, "toolu_seen", "Bash"),
+        raw_tool_result(12, "toolu_new", "Read", rule),
+    ]
+
+    leaves = ev.build_leaves([seen_llm, seen_tool], raw)
+
+    filled = {lf.name: lf for lf in leaves if lf.source == "raw"}
+    assert set(filled) == {"claude_code.llm_request", "Read"} and len(leaves) == 4
+    llm = filled["claude_code.llm_request"]
+    assert (llm.cost, llm.start, llm.end) == (0.25, T0 + 17, T0 + 20)
+    assert filled["Read"].file_path.endswith("rules/workflow.md")
 
 
 def run_attribution(leaves, raw, comments=(), commits=()):
@@ -484,8 +531,12 @@ class World:
         (self.always_dir / "guidelines.md").write_text("g" * 400)
         if with_raw:
             hook = {"hook_name": "PreToolUse:Bash", "total_duration_ms": "40"}
+            early = {"request_id": "req_early", "cost_usd": "0.1", "duration_ms": "2000"}
             (self.raw_dir / "logs.jsonl").write_text(
-                raw_line(SPOKE, "claude_code.hook_execution_complete", hook, 12) + "\n"
+                raw_line(SPOKE, "claude_code.hook_execution_complete", hook, 12)
+                + "\n"
+                + raw_line(SPOKE, "claude_code.api_request", early, -50)
+                + "\n"
             )
 
     def http(self, method, path, body=None):
@@ -531,6 +582,7 @@ def test_main_reports_one_session_and_a_rerun_posts_the_same_score_ids(tmp_path,
 
     out = capsys.readouterr().out
     assert "landed=true" in out and "review_rounds=1" in out and "gate_lane=plan" in out
+    assert "gap-filled from the raw JSONL" in out and "1 LLM request" in out
     assert "PreToolUse:Bash" in out and "bug-triage" in out and "Zero-use rules: workflow" in out
     assert len(first) == 16 and world.posted_ids() == sorted(first * 2)
     assert World.KEY not in out and not any(World.KEY in " ".join(a) for a in world.run_calls)

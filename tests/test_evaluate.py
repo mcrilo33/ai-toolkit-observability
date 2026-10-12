@@ -222,13 +222,16 @@ def test_count_dispatches_reads_the_raw_jsonl_and_the_blocked_comments_too():
     raw = [
         raw_agent_result(11, "toolu_a", "code-review"),
         raw_agent_result(500, "toolu_b", "code-review", claude=CLAUDE_B),
-        raw_agent_result(501, "toolu_c", "planner", claude=CLAUDE_B),
+        raw_agent_result(501, "toolu_c", "planner", claude="claude-c"),
     ]
-    life = ev.parse_lifecycle([comment(60, "blocked: worker_done failed")] * 2)
+    life = ev.parse_lifecycle([comment(60, "blocked: worker_done failed")])
 
     counts = ev.count_dispatches([seen], raw, life)
 
     assert counts == {"review_rounds": 2, "redispatches": 2}
+    assert ev.count_dispatches([seen], [], ev.parse_lifecycle([comment(60, "blocked: x")] * 3))[
+        "redispatches"
+    ] == 3
 
 
 def test_is_landed_trusts_the_comment_and_checks_git_when_it_can():
@@ -674,6 +677,16 @@ def test_main_reports_one_session_and_a_rerun_posts_the_same_score_ids(tmp_path,
     assert "PreToolUse:Bash" in out and "bug-triage" in out and "Zero-use rules: workflow" in out
     assert len(first) == 16 and world.posted_ids() == sorted(first * 2)
     assert World.KEY not in out and not any(World.KEY in " ".join(a) for a in world.run_calls)
+
+
+def test_main_notes_a_blocked_comment_without_a_second_claude_session(tmp_path, capsys):
+    world = World(tmp_path)
+    world.issue["comments"].append(comment(70, "blocked: worker_done failed"))
+
+    assert world.main("--json") == 0
+
+    notes = json.loads(capsys.readouterr().out)["sessions"][0]["notes"]
+    assert any("0 re-dispatch(es) in telemetry vs 1 blocked comment(s)" in n for n in notes)
 
 
 def test_main_keeps_trace_numbers_when_the_raw_jsonl_rotated_away(tmp_path, capsys):

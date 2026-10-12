@@ -1,16 +1,10 @@
 import datetime as dt
-import importlib.util
 import itertools
 import json
-import sys
+import urllib.error
 
+import evaluate as ev
 import pytest
-from conftest import REPO
-
-_spec = importlib.util.spec_from_file_location("evaluate", REPO / "scripts" / "evaluate.py")
-ev = importlib.util.module_from_spec(_spec)
-sys.modules["evaluate"] = ev
-_spec.loader.exec_module(ev)
 
 T0 = dt.datetime(2026, 10, 6, 14, 52, tzinfo=dt.UTC).timestamp()
 SPOKE = "8065ac0d-8af2-42c4-b495-c661f02002ec"
@@ -353,9 +347,7 @@ def test_publish_scores_with_the_stack_down_pushes_nothing():
     "failure,message",
     [
         pytest.param(OSError("refused"), "not reachable", id="connection-refused"),
-        pytest.param(
-            ev.urllib.error.HTTPError("u", 401, "no", {}, None), "HTTP 401", id="http-error"
-        ),
+        pytest.param(urllib.error.HTTPError("u", 401, "no", {}, None), "HTTP 401", id="http-error"),
     ],
 )
 def test_make_http_wraps_failures_without_leaking_the_key(failure, message):

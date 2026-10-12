@@ -9,4 +9,4 @@ dev = ["pytest>=8", "pytest-xdist>=3", "pyyaml>=6"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["tests"]
+pythonpath = ["tests", "scripts"]

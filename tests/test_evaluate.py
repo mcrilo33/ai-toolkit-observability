@@ -4,7 +4,6 @@ import itertools
 import sys
 
 import pytest
-
 from conftest import REPO
 
 _spec = importlib.util.spec_from_file_location("evaluate", REPO / "scripts" / "evaluate.py")
@@ -12,7 +11,7 @@ ev = importlib.util.module_from_spec(_spec)
 sys.modules["evaluate"] = ev
 _spec.loader.exec_module(ev)
 
-T0 = dt.datetime(2026, 10, 6, 14, 52, tzinfo=dt.timezone.utc).timestamp()
+T0 = dt.datetime(2026, 10, 6, 14, 52, tzinfo=dt.UTC).timestamp()
 SPOKE = "8065ac0d-8af2-42c4-b495-c661f02002ec"
 CLAUDE_A = "3defdb84-59b3-4c9a-8c52-84c3ae0de791"
 CLAUDE_B = "d74fa1e6-85c6-4e6e-a7bb-34e36625950b"
@@ -20,17 +19,41 @@ _ids = itertools.count(1)
 
 
 def iso(offset_s: float) -> str:
-    return dt.datetime.fromtimestamp(T0 + offset_s, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    return (
+        dt.datetime.fromtimestamp(T0 + offset_s, dt.UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[
+            :-3
+        ]
+        + "Z"
+    )
 
 
-def make_obs(name, start, end, *, type_="TOOL", parent=None, claude=CLAUDE_A, cost=None, level="DEFAULT", **attrs):
+def make_obs(
+    name,
+    start,
+    end,
+    *,
+    type_="TOOL",
+    parent=None,
+    claude=CLAUDE_A,
+    cost=None,
+    level="DEFAULT",
+    **attrs,
+):
     """A Langfuse v4 observation as /api/public/v2/observations returns it."""
     meta = {"repo": "ai-toolkit-observability", "attributes.session.id": claude}
     meta.update({f"attributes.{k}": v for k, v in attrs.items()})
     return {
-        "id": f"o{next(_ids)}", "parentObservationId": parent, "type": type_, "name": name,
-        "startTime": iso(start), "endTime": iso(end), "level": level, "sessionId": SPOKE,
-        "latency": end - start, "totalCost": cost, "metadata": meta,
+        "id": f"o{next(_ids)}",
+        "parentObservationId": parent,
+        "type": type_,
+        "name": name,
+        "startTime": iso(start),
+        "endTime": iso(end),
+        "level": level,
+        "sessionId": SPOKE,
+        "latency": end - start,
+        "totalCost": cost,
+        "metadata": meta,
         "usageDetails": {"total": 100} if cost else {},
     }
 
@@ -43,8 +66,23 @@ def comment(offset_s, body):
     "vcs,paths,forced,expected",
     [
         pytest.param(["1-feat-self-hosted-langfuse-v4-stack-on-lo"], [], None, 1, id="vcs-name"),
-        pytest.param([], ["cd /w/orca/workspaces/ai-toolkit-observability/2-feat-eval; ls"], None, 2, id="worktree-path"),
-        pytest.param([], ["/w/orca/workspaces/ai-toolkit-observability/2-feat-eval/x", "/w/orca/workspaces/ai-toolkit-observability/2-feat-eval/y"], 7, 7, id="forced-wins"),
+        pytest.param(
+            [],
+            ["cd /w/orca/workspaces/ai-toolkit-observability/2-feat-eval; ls"],
+            None,
+            2,
+            id="worktree-path",
+        ),
+        pytest.param(
+            [],
+            [
+                "/w/orca/workspaces/ai-toolkit-observability/2-feat-eval/x",
+                "/w/orca/workspaces/ai-toolkit-observability/2-feat-eval/y",
+            ],
+            7,
+            7,
+            id="forced-wins",
+        ),
         pytest.param([], ["no path here"], None, None, id="unknown"),
     ],
 )
@@ -122,7 +160,9 @@ def test_account_time_splits_blocked_on_user_out_of_a_tool_span():
 
 def test_account_time_marks_review_ship_and_commit_substeps():
     review_agent = make_obs("sub-agent:code-review", 500, 500.01)
-    review_llm = make_obs("sub-agent:llm", 500, 600, type_="GENERATION", parent=review_agent["id"], cost=0.5)
+    review_llm = make_obs(
+        "sub-agent:llm", 500, 600, type_="GENERATION", parent=review_agent["id"], cost=0.5
+    )
     observations = [
         make_obs("tool:Bash", 0, 50, full_command="x"),
         make_obs("tool:Bash", 200, 260, full_command="pytest"),
@@ -139,17 +179,23 @@ def test_account_time_marks_review_ship_and_commit_substeps():
     assert acct.steps["review"].active_s == pytest.approx(100)
     assert acct.steps["review"].cost_usd == pytest.approx(0.5)
     assert acct.steps["ship"].active_s == pytest.approx(10 + 10)
-    assert acct.steps["ship"].other_s == pytest.approx(10)  # the 710-720 gap sits inside the ship window
+    assert acct.steps["ship"].other_s == pytest.approx(
+        10
+    )  # the 710-720 gap sits inside the ship window
     assert acct.implement_parts["red"] == pytest.approx(60)
     assert acct.implement_parts["green"] == pytest.approx(0)
 
 
 def test_count_dispatches_counts_review_rounds_and_redispatches():
     review_a = make_obs("sub-agent:code-review", 10, 10.01, subagent_type="code-review")
-    review_b = make_obs("sub-agent:code-review", 900, 900.01, claude=CLAUDE_B, subagent_type="code-review")
+    review_b = make_obs(
+        "sub-agent:code-review", 900, 900.01, claude=CLAUDE_B, subagent_type="code-review"
+    )
     other = make_obs("sub-agent:planner", 20, 20.01, subagent_type="planner")
 
-    counts = ev.count_dispatches([review_a, review_b, other, make_obs("tool:Bash", 1, 2, claude=CLAUDE_B)])
+    counts = ev.count_dispatches(
+        [review_a, review_b, other, make_obs("tool:Bash", 1, 2, claude=CLAUDE_B)]
+    )
 
     assert counts == {"review_rounds": 2, "redispatches": 1}
 
@@ -174,8 +220,11 @@ def run_attribution(leaves, raw, comments=(), commits=()):
 
 
 def hook_record(offset, name, ms, blocking="0"):
-    return {"t": T0 + offset, "name": "claude_code.hook_execution_complete",
-            "attrs": {"hook_name": name, "total_duration_ms": str(ms), "num_blocking": blocking}}
+    return {
+        "t": T0 + offset,
+        "name": "claude_code.hook_execution_complete",
+        "attrs": {"hook_name": name, "total_duration_ms": str(ms), "num_blocking": blocking},
+    }
 
 
 def test_attribute_counts_agents_tools_hooks_and_rules_per_step():
@@ -189,8 +238,14 @@ def test_attribute_counts_agents_tools_hooks_and_rules_per_step():
         *[make_obs("tool:Bash", 10 + i, 10 + i + d) for i, d in enumerate([1, 2, 3, 4, 10])],
     ]
     failing = make_obs("tool:Bash", 30, 31)
-    observations += [failing, make_obs("claude_code.tool.execution", 30, 31, parent=failing["id"], level="ERROR")]
-    raw = [hook_record(1, "PreToolUse:Bash", 40), hook_record(2, "PreToolUse:Bash", 60, blocking="1")]
+    observations += [
+        failing,
+        make_obs("claude_code.tool.execution", 30, 31, parent=failing["id"], level="ERROR"),
+    ]
+    raw = [
+        hook_record(1, "PreToolUse:Bash", 40),
+        hook_record(2, "PreToolUse:Bash", 60, blocking="1"),
+    ]
 
     stats = run_attribution(ev.build_leaves(observations), raw, [comment(1000, "Gate answered")])
 
@@ -221,10 +276,24 @@ def test_list_unused_rules_lists_rule_files_never_read(tmp_path):
 
 
 def make_report(**kw):
-    acct = ev.Accounting({s: ev.StepTime() for s in ev.STEPS}, {"red": 0.0, "green": 0.0, "refactor": 0.0, "other": 0.0})
+    acct = ev.Accounting(
+        {s: ev.StepTime() for s in ev.STEPS},
+        {"red": 0.0, "green": 0.0, "refactor": 0.0, "other": 0.0},
+    )
     acct.steps["implement"].active_s = 60.0
-    base = dict(session=SPOKE, issue=1, title="t", gate_lane="plan", landed=True, review_rounds=2,
-                redispatches=1, accounting=acct, attribution=ev.Attribution(), notes=[], labels=[])
+    base = dict(
+        session=SPOKE,
+        issue=1,
+        title="t",
+        gate_lane="plan",
+        landed=True,
+        review_rounds=2,
+        redispatches=1,
+        accounting=acct,
+        attribution=ev.Attribution(),
+        notes=[],
+        labels=[],
+    )
     return ev.SessionReport(**{**base, **kw})
 
 
@@ -235,9 +304,18 @@ def test_build_scores_is_idempotent_and_typed():
     by_name = {s["name"]: s for s in first}
     assert len({s["id"] for s in first}) == len(first)
     assert (by_name["landed"]["dataType"], by_name["landed"]["value"]) == ("BOOLEAN", 1)
-    assert (by_name["gate_lane"]["dataType"], by_name["gate_lane"]["value"]) == ("CATEGORICAL", "plan")
+    assert (by_name["gate_lane"]["dataType"], by_name["gate_lane"]["value"]) == (
+        "CATEGORICAL",
+        "plan",
+    )
     assert by_name["step_implement_active_s"]["value"] == 60.0
-    assert {"cost_usd_total", "duration_active_s", "waiting_s", "review_rounds", "redispatches"} <= set(by_name)
+    assert {
+        "cost_usd_total",
+        "duration_active_s",
+        "waiting_s",
+        "review_rounds",
+        "redispatches",
+    } <= set(by_name)
     assert all(s["sessionId"] == SPOKE for s in first)
 
 
@@ -248,7 +326,9 @@ class FakeHttp:
     def __call__(self, method, path, body=None):
         self.calls.append((method, path, body))
         if self.down:
-            raise ev.EvalError("Langfuse is not reachable at http://127.0.0.1:3000; run scripts/langfuse.sh up")
+            raise ev.EvalError(
+                "Langfuse is not reachable at http://127.0.0.1:3000; run scripts/langfuse.sh up"
+            )
         return {"id": body["id"]} if body else {"status": "OK"}
 
 
@@ -275,7 +355,9 @@ def test_publish_scores_with_the_stack_down_pushes_nothing():
     "failure,message",
     [
         pytest.param(OSError("refused"), "not reachable", id="connection-refused"),
-        pytest.param(ev.urllib.error.HTTPError("u", 401, "no", {}, None), "HTTP 401", id="http-error"),
+        pytest.param(
+            ev.urllib.error.HTTPError("u", 401, "no", {}, None), "HTTP 401", id="http-error"
+        ),
     ],
 )
 def test_make_http_wraps_failures_without_leaking_the_key(failure, message):
@@ -293,11 +375,20 @@ def test_make_http_wraps_failures_without_leaking_the_key(failure, message):
 def test_render_report_has_the_four_component_tables_and_the_zero_use_list():
     rep = make_report(notes=["raw JSONL rotated away: hooks and branch name unavailable"])
     rep.attribution.rules["bug-triage"] = 2
-    agg = ev.aggregate([rep], unused_rules=["workflow"], rule_sizes=[ev.RuleSize("guidelines", 400, 100, False)])
+    agg = ev.aggregate(
+        [rep], unused_rules=["workflow"], rule_sizes=[ev.RuleSize("guidelines", 400, 100, False)]
+    )
 
     text = ev.render_report([rep], agg)
 
-    for heading in ("Agents", "Tools", "Hooks", "On-demand rules", "Zero-use rules: workflow", "cost only - usefulness not measurable here"):
+    for heading in (
+        "Agents",
+        "Tools",
+        "Hooks",
+        "On-demand rules",
+        "Zero-use rules: workflow",
+        "cost only - usefulness not measurable here",
+    ):
         assert heading in text
     assert "raw JSONL rotated away" in text
     assert "landed=true" in text and "review_rounds=2" in text

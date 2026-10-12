@@ -1,6 +1,7 @@
 import datetime as dt
 import importlib.util
 import itertools
+import json
 import sys
 
 import pytest
@@ -20,10 +21,7 @@ _ids = itertools.count(1)
 
 def iso(offset_s: float) -> str:
     return (
-        dt.datetime.fromtimestamp(T0 + offset_s, dt.UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[
-            :-3
-        ]
-        + "Z"
+        dt.datetime.fromtimestamp(T0 + offset_s, dt.UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     )
 
 
@@ -392,3 +390,175 @@ def test_render_report_has_the_four_component_tables_and_the_zero_use_list():
         assert heading in text
     assert "raw JSONL rotated away" in text
     assert "landed=true" in text and "review_rounds=2" in text
+
+
+def raw_line(session, name, attrs, offset):
+    """One OTLP log line as the collector's file exporter writes it."""
+    pairs = [{"key": k, "value": {"stringValue": v}} for k, v in attrs.items()]
+    record = {
+        "timeUnixNano": str(int((T0 + offset) * 1e9)),
+        "body": {"stringValue": name},
+        "attributes": pairs,
+    }
+    resource = [{"key": "spoke_run_id", "value": {"stringValue": session}}]
+    entry = {
+        "resourceLogs": [
+            {"resource": {"attributes": resource}, "scopeLogs": [{"logRecords": [record]}]}
+        ]
+    }
+    return json.dumps(entry)
+
+
+def test_load_raw_reads_rotated_files_and_keeps_only_wanted_sessions(tmp_path):
+    hook = {"hook_name": "PreToolUse:Bash", "total_duration_ms": "40"}
+    (tmp_path / "logs.jsonl").write_text(
+        raw_line(SPOKE, "claude_code.hook_execution_complete", hook, 5)
+        + "\n"
+        + raw_line("other-session", "claude_code.hook_execution_complete", hook, 6)
+        + "\nnot json\n"
+    )
+    (tmp_path / "logs-2026-10-04T17-06-15.005-size.jsonl").write_text(
+        raw_line(SPOKE, "claude_code.tool_result", {"vcs.ref.head.name": "1-feat-x"}, 1)
+        + "\n"
+        + raw_line(SPOKE, "claude_code.api_request", {"model": "m"}, 2)
+        + "\n"
+    )
+
+    raw = ev.load_raw(tmp_path, {SPOKE})
+
+    assert sorted(r["name"] for r in raw[SPOKE]) == [
+        "claude_code.hook_execution_complete",
+        "claude_code.tool_result",
+    ]
+    assert "other-session" not in raw
+
+
+def test_fetch_observations_follows_the_cursor():
+    pages = {
+        None: {"data": [{"id": "a"}], "meta": {"cursor": "c1"}},
+        "c1": {"data": [{"id": "b"}], "meta": {}},
+    }
+    seen = []
+
+    def http(method, path, body=None):
+        seen.append(path)
+        return pages["c1" if "cursor=c1" in path else None]
+
+    assert [o["id"] for o in ev.fetch_observations(http, since="2026-10-01")] == ["a", "b"]
+    assert "fromStartTime=2026-10-01" in seen[0]
+
+
+class World:
+    """Canned Langfuse, gh, git and Keychain answers for `main`."""
+
+    KEY = "sk-lf-very-secret"
+
+    def __init__(self, tmp_path, *, down=False, with_raw=True):
+        review = make_obs("sub-agent:code-review", 100, 100.01, subagent_type="code-review")
+        self.observations = [
+            make_obs(
+                "tool:Bash",
+                0,
+                5,
+                full_command="cd /w/orca/workspaces/ai-toolkit-observability/1-feat-x",
+            ),
+            make_obs("claude_code.llm_request", 10, 20, type_="GENERATION", cost=0.5),
+            make_obs("tool:Read", 30, 31, file_path="/w/.ai-toolkit/rules/bug-triage.md"),
+            review,
+            make_obs("sub-agent:llm", 100, 130, type_="GENERATION", parent=review["id"], cost=0.25),
+            make_obs("tool:Bash", 200, 205, full_command="git push -u origin HEAD"),
+            make_obs(
+                "tool:Bash", 210, 215, full_command="orca orchestration send --type worker_done"
+            ),
+        ]
+        self.issue = {
+            "number": 1,
+            "title": "feat: x",
+            "state": "CLOSED",
+            "labels": [{"name": "enhancement"}],
+            "body": "## Problem\n\nScope: a\nGate: plan\n",
+            "comments": [comment(60, 'Gate answered "approve"'), comment(300, "landed in abc1234")],
+        }
+        self.http_calls, self.run_calls, self.down = [], [], down
+        self.raw_dir, self.rules_dir, self.always_dir = (
+            tmp_path / "raw",
+            tmp_path / "rules",
+            tmp_path / "always",
+        )
+        for d in (self.raw_dir, self.rules_dir, self.always_dir):
+            d.mkdir()
+        (self.rules_dir / "bug-triage.md").write_text("x")
+        (self.rules_dir / "workflow.md").write_text("x")
+        (self.always_dir / "guidelines.md").write_text("g" * 400)
+        if with_raw:
+            hook = {"hook_name": "PreToolUse:Bash", "total_duration_ms": "40"}
+            (self.raw_dir / "logs.jsonl").write_text(
+                raw_line(SPOKE, "claude_code.hook_execution_complete", hook, 12) + "\n"
+            )
+
+    def http(self, method, path, body=None):
+        self.http_calls.append((method, path, body))
+        if self.down:
+            raise ev.EvalError(
+                "Langfuse is not reachable at http://127.0.0.1:3000; run scripts/langfuse.sh up"
+            )
+        return {"data": self.observations, "meta": {}} if "/v2/observations" in path else {}
+
+    def run(self, args):
+        self.run_calls.append(args)
+        if args[:3] == ["gh", "issue", "view"]:
+            return json.dumps(self.issue)
+        if args[:3] == ["gh", "repo", "view"]:
+            return "ai-toolkit-observability\n"
+        if args[:2] == ["git", "log"]:
+            return f"{int(T0 + 150)}\tfeat: x (#1)\n"
+        return self.KEY if args[0] == "security" else ""
+
+    def main(self, *extra):
+        argv = [
+            "--raw-dir",
+            str(self.raw_dir),
+            "--rules-dir",
+            str(self.rules_dir),
+            "--always-on-dir",
+            str(self.always_dir),
+            *extra,
+        ]
+        return ev.main(argv, http=self.http, run=self.run)
+
+    def posted_ids(self):
+        return sorted(c[2]["id"] for c in self.http_calls if c[0] == "POST")
+
+
+def test_main_reports_one_session_and_a_rerun_posts_the_same_score_ids(tmp_path, capsys):
+    world = World(tmp_path)
+
+    assert world.main() == 0
+    first = world.posted_ids()
+    assert world.main() == 0
+
+    out = capsys.readouterr().out
+    assert "landed=true" in out and "review_rounds=1" in out and "gate_lane=plan" in out
+    assert "PreToolUse:Bash" in out and "bug-triage" in out and "Zero-use rules: workflow" in out
+    assert len(first) == 16 and world.posted_ids() == sorted(first * 2)
+    assert World.KEY not in out and not any(World.KEY in " ".join(a) for a in world.run_calls)
+
+
+def test_main_keeps_trace_numbers_when_the_raw_jsonl_rotated_away(tmp_path, capsys):
+    world = World(tmp_path, with_raw=False)
+
+    assert world.main("--json") == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert any("raw JSONL" in n for n in report["sessions"][0]["notes"])
+    assert report["sessions"][0]["cost_usd"] == pytest.approx(0.75)
+    assert len(world.posted_ids()) == 16
+
+
+def test_main_with_the_stack_down_fails_clearly_and_posts_nothing(tmp_path, capsys):
+    world = World(tmp_path, down=True)
+
+    assert world.main() == 2
+
+    assert "not reachable" in capsys.readouterr().err
+    assert world.posted_ids() == []

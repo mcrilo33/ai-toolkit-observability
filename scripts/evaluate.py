@@ -154,35 +154,46 @@ SPOKE_ID = re.compile(r'"spoke_run_id"\s*,\s*"value"\s*:\s*\{\s*"stringValue"\s*
 
 
 def load_raw(raw_dir: Path, wanted: set[str]) -> dict[str, list[dict]]:
-    """Read hook, tool and request records of `wanted` sessions from every collector file."""
+    """Read hook, tool and request records of `wanted` sessions from every collector file.
+
+    A line may batch several resources (sessions); each resource names its own session.
+    """
     out: dict[str, list[dict]] = defaultdict(list)
     for path in sorted(raw_dir.glob("logs*.jsonl")):
         with path.open(errors="replace") as lines:
             for line in lines:
-                if (m := SPOKE_ID.search(line)) and m[1] in wanted:
-                    out[m[1]].extend(_parse_raw_line(line, m[1]))
+                if wanted.isdisjoint(SPOKE_ID.findall(line)):
+                    continue
+                for session, record in _parse_raw_line(line):
+                    if session in wanted:
+                        out[session].append(record)
     return out
 
 
-def _parse_raw_line(line: str, session: str) -> list[dict]:
+def _parse_raw_line(line: str) -> list[tuple[str, dict]]:
     try:
         entry = json.loads(line)
     except ValueError:
         return []
     records = []
     for resource_logs in entry.get("resourceLogs", []):
+        resource = resource_logs.get("resource", {}).get("attributes", [])
+        session = next(
+            (a["value"].get("stringValue") for a in resource if a["key"] == "spoke_run_id"), None
+        )
         for scope in resource_logs.get("scopeLogs", []):
             for rec in scope.get("logRecords", []):
                 name = rec.get("body", {}).get("stringValue")
-                if name not in RAW_EVENTS or "timeUnixNano" not in rec:
+                if session is None or name not in RAW_EVENTS:
                     continue
                 attrs = {
                     a["key"]: next(iter(a["value"].values()), "") for a in rec.get("attributes", [])
                 }
-                if attrs.get("spoke_run_id", session) == session:
-                    records.append(
-                        {"t": int(rec["timeUnixNano"]) / 1e9, "name": name, "attrs": attrs}
-                    )
+                try:
+                    t = int(rec["timeUnixNano"]) / 1e9
+                except (KeyError, ValueError):
+                    continue
+                records.append((session, {"t": t, "name": name, "attrs": attrs}))
     return records
 
 

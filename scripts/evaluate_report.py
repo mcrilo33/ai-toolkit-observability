@@ -20,7 +20,16 @@ ON_DEMAND_RULE = re.compile(r"\.ai-toolkit/rules/([\w-]+)\.md$")
 BASH_READER = re.compile(r"\b(?:cat|sed|head|tail|grep|rg|less|bat|awk|nl)\b")
 BASH_SEGMENT = re.compile(r"&&|\|\||[;|\n]")
 RULE_PATH = re.compile(r"\.ai-toolkit/rules/([\w-]+)\.md")
-NOT_A_READ = ("git commit", "gh issue", "gh pr", "orca orchestration")
+NOT_A_READ = (  # commands that carry free text, where a path is quoted rather than read
+    "git commit",
+    "gh issue create",
+    "gh issue comment",
+    "gh issue edit",
+    "gh pr create",
+    "gh pr comment",
+    "gh pr edit",
+    "orca orchestration",
+)
 
 
 def percentile(values: list[float], q: int) -> float:
@@ -51,9 +60,11 @@ class Attribution:
 
 def _rules_read_by_bash(command: str) -> set[str]:
     """Return the rules a Bash command reads: every rule path in a segment that has a reader."""
+    if any(x in command for x in NOT_A_READ):
+        return set()  # quoted text in a commit message or issue body is not a read
     names: set[str] = set()
     for segment in BASH_SEGMENT.split(command):
-        if BASH_READER.search(segment) and not any(x in segment for x in NOT_A_READ):
+        if BASH_READER.search(segment):
             names.update(RULE_PATH.findall(segment))
     return names
 

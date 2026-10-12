@@ -342,7 +342,7 @@ def test_attribute_counts_agents_tools_hooks_and_rules_per_step():
     assert stats.agents[("review", "code-review")]["cost_usd"] == pytest.approx(0.4)
     assert stats.agents[("plan", "main")]["calls"] == 1
     bash = stats.tools[("plan", "Bash")]
-    assert (bash["calls"], bash["failures"]) == (10, 1)
+    assert (bash["calls"], bash["failures"]) == (11, 1)
     assert ev.percentile(bash["durations"], 90) == 4
     assert stats.hooks[("plan", "PreToolUse:Bash")] == {"runs": 2, "total_ms": 100.0, "blocking": 1}
     assert dict(stats.rules) == {"bug-triage": 1, "workflow": 1, "a": 1, "b": 1}

@@ -197,6 +197,12 @@ def test_account_time_marks_review_ship_and_commit_substeps():
     assert acct.implement_parts["green"] == pytest.approx(0)
 
 
+def raw_agent_result(offset, tool_use_id, subagent_type, claude=CLAUDE_A):
+    attrs = {"tool_use_id": tool_use_id, "tool_name": "Agent", "session.id": claude}
+    attrs["tool_parameters"] = json.dumps({"subagent_type": subagent_type})
+    return {"t": T0 + offset, "name": "claude_code.tool_result", "attrs": attrs}
+
+
 def test_count_dispatches_counts_review_rounds_and_redispatches():
     review_a = make_obs("sub-agent:code-review", 10, 10.01, subagent_type="code-review")
     review_b = make_obs(
@@ -205,10 +211,24 @@ def test_count_dispatches_counts_review_rounds_and_redispatches():
     other = make_obs("sub-agent:planner", 20, 20.01, subagent_type="planner")
 
     counts = ev.count_dispatches(
-        [review_a, review_b, other, make_obs("tool:Bash", 1, 2, claude=CLAUDE_B)]
+        [review_a, review_b, other, make_obs("tool:Bash", 1, 2, claude=CLAUDE_B)], [], ev.Lifecycle()
     )
 
     assert counts == {"review_rounds": 2, "redispatches": 1}
+
+
+def test_count_dispatches_reads_the_raw_jsonl_and_the_blocked_comments_too():
+    seen = make_obs("sub-agent:code-review", 10, 10.01, subagent_type="code-review")
+    raw = [
+        raw_agent_result(11, "toolu_a", "code-review"),
+        raw_agent_result(500, "toolu_b", "code-review", claude=CLAUDE_B),
+        raw_agent_result(501, "toolu_c", "planner", claude=CLAUDE_B),
+    ]
+    life = ev.parse_lifecycle([comment(60, "blocked: worker_done failed")] * 2)
+
+    counts = ev.count_dispatches([seen], raw, life)
+
+    assert counts == {"review_rounds": 2, "redispatches": 2}
 
 
 def test_is_landed_trusts_the_comment_and_checks_git_when_it_can():
@@ -650,7 +670,7 @@ def test_main_reports_one_session_and_a_rerun_posts_the_same_score_ids(tmp_path,
     out = capsys.readouterr().out
     assert "landed=true" in out and "review_rounds=1" in out and "gate_lane=plan" in out
     assert "gap-filled from the raw JSONL" in out and "1 LLM request" in out
-    assert "raw JSONL covers only" in out
+    assert "raw JSONL covers only" in out and "lower bound" in out
     assert "PreToolUse:Bash" in out and "bug-triage" in out and "Zero-use rules: workflow" in out
     assert len(first) == 16 and world.posted_ids() == sorted(first * 2)
     assert World.KEY not in out and not any(World.KEY in " ".join(a) for a in world.run_calls)
@@ -663,6 +683,7 @@ def test_main_keeps_trace_numbers_when_the_raw_jsonl_rotated_away(tmp_path, caps
 
     report = json.loads(capsys.readouterr().out)
     assert any("raw JSONL" in n for n in report["sessions"][0]["notes"])
+    assert any("lower bound" in n for n in report["sessions"][0]["notes"])
     assert report["sessions"][0]["cost_usd"] == pytest.approx(0.75)
     assert len(world.posted_ids()) == 16
 

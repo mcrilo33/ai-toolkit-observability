@@ -17,9 +17,9 @@ from evaluate_time import STEPS, Accounting, EvalError, Leaf, Stepper, StepTime
 
 ON_DEMAND_RULE = re.compile(r"\.ai-toolkit/rules/([\w-]+)\.md$")
 # Workers load rules with Bash far more often than with Read: cat/sed/head/grep on the file.
-BASH_RULE_READ = re.compile(
-    r"\b(?:cat|sed|head|tail|grep|rg|less|bat|awk|nl)\b[^|;&\n]*?\.ai-toolkit/rules/([\w-]+)\.md"
-)
+BASH_READER = re.compile(r"\b(?:cat|sed|head|tail|grep|rg|less|bat|awk|nl)\b")
+BASH_SEGMENT = re.compile(r"&&|\|\||[;|\n]")
+RULE_PATH = re.compile(r"\.ai-toolkit/rules/([\w-]+)\.md")
 NOT_A_READ = ("git commit", "gh issue", "gh pr", "orca orchestration")
 
 
@@ -49,6 +49,15 @@ class Attribution:
     rules: Counter = field(default_factory=Counter)
 
 
+def _rules_read_by_bash(command: str) -> set[str]:
+    """Return the rules a Bash command reads: every rule path in a segment that has a reader."""
+    names: set[str] = set()
+    for segment in BASH_SEGMENT.split(command):
+        if BASH_READER.search(segment) and not any(x in segment for x in NOT_A_READ):
+            names.update(RULE_PATH.findall(segment))
+    return names
+
+
 def attribute(leaves: list[Leaf], raw_records: list[dict], stepper: Stepper) -> Attribution:
     """Attribute leaves and raw hook records to the step they started in."""
     out = Attribution()
@@ -68,8 +77,8 @@ def attribute(leaves: list[Leaf], raw_records: list[dict], stepper: Stepper) -> 
             tool["durations"].append(leaf.end - leaf.start - leaf.blocked_s)
             if leaf.name == "Read" and (m := ON_DEMAND_RULE.search(leaf.file_path)):
                 out.rules[m[1]] += 1
-            elif leaf.name == "Bash" and not any(x in leaf.command for x in NOT_A_READ):
-                out.rules.update(set(BASH_RULE_READ.findall(leaf.command)))
+            elif leaf.name == "Bash":
+                out.rules.update(_rules_read_by_bash(leaf.command))
     for rec in raw_records:
         if rec["name"] != "claude_code.hook_execution_complete":
             continue
@@ -159,14 +168,23 @@ def build_scores(rep: SessionReport) -> list[dict]:
     return scores
 
 
-def make_http(base_url: str, public_key: str, secret_key: str, urlopen=urllib.request.urlopen):
-    """Return `http(method, path, body=None) -> dict` for Langfuse; keys go in a header only."""
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None  # a redirect becomes an HTTPError instead of resending the key elsewhere
+
+
+def make_http(base_url: str, public_key: str, secret_key: str, urlopen=None):
+    """Return `http(method, path, body=None) -> dict` for Langfuse; keys go in a header only.
+
+    The header is never copied to a redirect target and redirects are not followed.
+    """
+    urlopen = urlopen or urllib.request.build_opener(_NoRedirect).open
     auth = "Basic " + base64.b64encode(f"{public_key}:{secret_key}".encode()).decode()
 
     def http(method: str, path: str, body: dict | None = None) -> dict:
         data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(base_url + path, data=data, method=method)
-        request.add_header("Authorization", auth)
+        request.add_unredirected_header("Authorization", auth)
         request.add_header("Content-Type", "application/json")
         try:
             with urlopen(request, timeout=60) as resp:

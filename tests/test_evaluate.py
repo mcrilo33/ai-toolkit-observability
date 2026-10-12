@@ -340,7 +340,7 @@ def test_attribute_counts_agents_tools_hooks_and_rules_per_step():
     assert stats.agents[("plan", "main")]["calls"] == 1
     bash = stats.tools[("plan", "Bash")]
     assert (bash["calls"], bash["failures"]) == (10, 1)
-    assert ev.percentile(bash["durations"], 90) == 10
+    assert ev.percentile(bash["durations"], 90) == 4
     assert stats.hooks[("plan", "PreToolUse:Bash")] == {"runs": 2, "total_ms": 100.0, "blocking": 1}
     assert dict(stats.rules) == {"bug-triage": 1, "workflow": 1, "a": 1, "b": 1}
 
@@ -747,8 +747,10 @@ def test_main_turns_a_failing_gh_into_a_clear_error_and_posts_nothing(tmp_path, 
 
 
 def test_load_raw_survives_a_record_without_optional_otlp_fields(tmp_path):
-    bare = {"resourceLogs": [{"resource": {}, "scopeLogs": [{"logRecords": [{"body": {}}]}]}]}
-    line = json.dumps(bare).replace("{}", '{"stringValue": "x"}', 0)
-    (tmp_path / "logs.jsonl").write_text(line + "\n" + f'{{"spoke_run_id":"{SPOKE}"}}\n')
+    entry = json.loads(raw_line(SPOKE, "claude_code.tool_result", {}, 1))
+    del entry["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
+    (tmp_path / "logs.jsonl").write_text(json.dumps(entry) + "\n")
 
-    assert ev.load_raw(tmp_path, {SPOKE}) == {}
+    raw = ev.load_raw(tmp_path, {SPOKE})
+
+    assert [(r["name"], r["attrs"]) for r in raw[SPOKE]] == [("claude_code.tool_result", {})]

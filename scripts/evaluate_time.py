@@ -143,7 +143,7 @@ def build_leaves(observations: list[dict], raw_records: list[dict] = ()) -> list
             blocked[o.get("parentObservationId")] += o["latency"] or 0.0
     leaves = []
     for o in observations:
-        if (kind := _leaf_kind(o)) is None or not o.get("endTime"):
+        if (kind := _leaf_kind(o)) is None:
             continue
         tool = (
             o["name"].removeprefix("tool:")
@@ -155,7 +155,7 @@ def build_leaves(observations: list[dict], raw_records: list[dict] = ()) -> list
                 kind=kind,
                 name=o["name"] if kind != "tool" else tool,
                 start=parse_time(o["startTime"]),
-                end=parse_time(o["endTime"]),
+                end=parse_time(o.get("endTime") or o["startTime"]),
                 cost=o.get("totalCost") or 0.0,
                 tokens=(o.get("usageDetails") or {}).get("total", 0),
                 claude=_attr(o, "session.id", ""),
@@ -257,17 +257,13 @@ def parse_lifecycle(comments: list[dict]) -> Lifecycle:
             open_permissions.append((at, _tool_of(body)))
         elif body.startswith("Permission answered") and open_permissions:
             tool = _tool_of(body)
-            i = next(
-                (
-                    i
-                    for i in reversed(range(len(open_permissions)))
-                    if open_permissions[i][1] == tool
-                ),
-                -1,
-            )
-            life.waits.append(Wait(open_permissions.pop(i)[0], at, "permission", True))
+            matches = [i for i, (_, t) in enumerate(open_permissions) if tool in ("", t)]
+            if matches:
+                life.waits.append(
+                    Wait(open_permissions.pop(matches[-1])[0], at, "permission", True)
+                )
         elif body.startswith("A gate question needs a human"):
-            gate_open = at
+            gate_open = at if gate_open is None else gate_open  # a re-ask keeps the first time
         elif body.startswith("blocked:"):
             life.blocked_count += 1
             close_gate(at, False)

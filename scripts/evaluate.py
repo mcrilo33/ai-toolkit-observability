@@ -55,6 +55,7 @@ from evaluate_time import (
     is_landed,
     load_commits,
     parse_lifecycle,
+    parse_time,
 )
 
 __all__ = [
@@ -89,6 +90,7 @@ __all__ = [
 ]
 
 LANGFUSE_URL = "http://127.0.0.1:3000"
+RAW_SLACK_S = 120  # tolerated gap between the raw files and the session edges
 KEYCHAIN_SERVICE = "ai-toolkit-langfuse-LANGFUSE_INIT_PROJECT_{}_KEY"
 RAW_EVENTS = {
     "claude_code.hook_execution_complete",
@@ -133,11 +135,12 @@ def load_credentials(run) -> tuple[str, str]:
     return keys[0], keys[1]
 
 
-def fetch_observations(http, *, since: str | None = None, until: str | None = None) -> list[dict]:
-    """Page through Langfuse v4's /api/public/v2/observations (the legacy endpoints are off)."""
+def fetch_observations(http) -> list[dict]:
+    """Page through all of Langfuse v4's /api/public/v2/observations (legacy endpoints are off).
+
+    No time bounds: a window must pick whole sessions, never clip a session's spans.
+    """
     query = "limit=1000&fields=core,basic,usage,metadata"
-    query += f"&fromStartTime={since}" if since else ""
-    query += f"&toStartTime={until}" if until else ""
     out, cursor = [], None
     while True:
         suffix = f"&cursor={urllib.parse.quote(cursor, safe='')}" if cursor else ""
@@ -147,33 +150,40 @@ def fetch_observations(http, *, since: str | None = None, until: str | None = No
             return out
 
 
+SPOKE_ID = re.compile(r'"spoke_run_id"\s*,\s*"value"\s*:\s*\{\s*"stringValue"\s*:\s*"([^"]+)"')
+
+
 def load_raw(raw_dir: Path, wanted: set[str]) -> dict[str, list[dict]]:
-    """Read hook and branch records of `wanted` sessions from every collector JSONL file."""
+    """Read hook, tool and request records of `wanted` sessions from every collector file."""
     out: dict[str, list[dict]] = defaultdict(list)
     for path in sorted(raw_dir.glob("logs*.jsonl")):
-        for line in path.read_text(errors="replace").splitlines():
-            if not any(w in line for w in wanted):
-                continue
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue
-            for resource_logs in entry.get("resourceLogs", []):
-                res = {
-                    a["key"]: next(iter(a["value"].values()))
-                    for a in resource_logs["resource"]["attributes"]
-                }
-                for scope in resource_logs["scopeLogs"]:
-                    for rec in scope["logRecords"]:
-                        name = rec["body"].get("stringValue")
-                        attrs = {
-                            a["key"]: next(iter(a["value"].values()), "") for a in rec["attributes"]
-                        }
-                        if name in RAW_EVENTS and res.get("spoke_run_id") in wanted:
-                            out[res["spoke_run_id"]].append(
-                                {"t": int(rec["timeUnixNano"]) / 1e9, "name": name, "attrs": attrs}
-                            )
+        with path.open(errors="replace") as lines:
+            for line in lines:
+                if (m := SPOKE_ID.search(line)) and m[1] in wanted:
+                    out[m[1]].extend(_parse_raw_line(line, m[1]))
     return out
+
+
+def _parse_raw_line(line: str, session: str) -> list[dict]:
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        return []
+    records = []
+    for resource_logs in entry.get("resourceLogs", []):
+        for scope in resource_logs.get("scopeLogs", []):
+            for rec in scope.get("logRecords", []):
+                name = rec.get("body", {}).get("stringValue")
+                if name not in RAW_EVENTS or "timeUnixNano" not in rec:
+                    continue
+                attrs = {
+                    a["key"]: next(iter(a["value"].values()), "") for a in rec.get("attributes", [])
+                }
+                if attrs.get("spoke_run_id", session) == session:
+                    records.append(
+                        {"t": int(rec["timeUnixNano"]) / 1e9, "name": name, "attrs": attrs}
+                    )
+    return records
 
 
 def load_issue(run, number: int) -> dict:
@@ -201,6 +211,22 @@ def _describe_gap_fill(filled: list) -> str:
     )
 
 
+def _describe_partial_raw(raw: list[dict], leaves: list) -> str | None:
+    """Say when the raw JSONL covers only part of the session (the files rotate by size)."""
+    own = [lf for lf in leaves if lf.source == "langfuse"] or leaves
+    if not raw or not own:
+        return None
+    clock = lambda t: dt.datetime.fromtimestamp(t, dt.UTC).strftime("%H:%M:%S")  # noqa: E731
+    lo, hi = min(r["t"] for r in raw), max(r["t"] for r in raw)
+    first, last = min(lf.start for lf in own), max(lf.end for lf in own)
+    if lo <= first + RAW_SLACK_S and hi >= last - RAW_SLACK_S:
+        return None
+    return (
+        f"raw JSONL covers only {clock(lo)}-{clock(hi)} UTC of the session's {clock(first)}-"
+        f"{clock(last)}: hooks and gap-filled spans are incomplete outside it"
+    )
+
+
 def analyse_session(session, observations, raw, issue, commits, run) -> SessionReport:
     """Build the report of one session from its observations, raw records, issue and commits."""
     leaves = build_leaves(observations, raw)
@@ -216,6 +242,8 @@ def analyse_session(session, observations, raw, issue, commits, run) -> SessionR
         )
     if filled := [lf for lf in leaves if lf.source == "raw"]:
         notes.append(_describe_gap_fill(filled))
+    if note := _describe_partial_raw(raw, leaves):
+        notes.append(note)
     if issue and not life.gate_answered_at:
         notes.append("no gate-answer comment: the plan step is empty")
     if issue and counts["redispatches"] != life.blocked_count:
@@ -253,7 +281,6 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     ap.add_argument("--since", help="ISO date or time: sessions starting after it")
     ap.add_argument("--until", help="ISO date or time: sessions starting before it")
-    ap.add_argument("--repo", help="repository name (default: the current gh repository)")
     ap.add_argument("--url", default=LANGFUSE_URL, help="Langfuse base URL")
     ap.add_argument("--raw-dir", type=Path, default=Path.home() / ".ai-toolkit" / "otel-raw")
     ap.add_argument("--rules-dir", type=Path, default=Path(".ai-toolkit/rules"))
@@ -263,32 +290,46 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
+def _to_epoch(flag: str, value: str | None) -> float | None:
+    """Parse a --since/--until value (a date or an ISO time; no zone means UTC)."""
+    if value is None:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise EvalError(f"{flag} {value!r} is not an ISO date or time (e.g. 2026-10-01)") from None
+    return (parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.UTC)).timestamp()
+
+
 def _select_sessions(args, observations, raw, repo) -> dict[str, int | None]:
-    """Map each session of this repository to its issue number (None when unknown)."""
+    """Map each wanted session to its issue number (None when unknown).
+
+    The window and the repo check pick whole sessions by their first span; an explicit
+    `--session` bypasses both. A session is always scored from all of its spans.
+    """
+    since, until = _to_epoch("--since", args.since), _to_epoch("--until", args.until)
     by_session = defaultdict(list)
     for o in observations:
         if o.get("sessionId") and (not args.session or o["sessionId"] in args.session):
             by_session[o["sessionId"]].append(o)
     forced = args.issue[0] if args.session and args.issue and len(args.issue) == 1 else None
-    joined = {
-        s: find_issue(obs, raw.get(s, []), repo, forced)
-        for s, obs in by_session.items()
-        if repo in {o["metadata"].get("repo") for o in obs}
-    }
+    joined = {}
+    for session, obs in by_session.items():
+        started = min(parse_time(o["startTime"]) for o in obs)
+        in_window = (since is None or started >= since) and (until is None or started <= until)
+        in_repo = repo in {o["metadata"].get("repo") for o in obs}
+        if args.session or (in_window and in_repo):
+            joined[session] = find_issue(obs, raw.get(session, []), repo, forced)
     return {s: n for s, n in joined.items() if not args.issue or n in args.issue}
-
-
-def _iso(value: str | None) -> str | None:
-    return value if value is None or "T" in value else f"{value}T00:00:00Z"
 
 
 def main(argv: list[str] | None = None, *, http=None, run=None) -> int:
     """Run the evaluation; returns 0 on success and 2 on an operator-actionable error."""
     args, run = parse_args(argv), run or run_command
     try:
-        repo = args.repo or run(["gh", "repo", "view", "--json", "name", "-q", ".name"]).strip()
+        repo = run(["gh", "repo", "view", "--json", "name", "-q", ".name"]).strip()
         http = http or make_http(args.url, *load_credentials(run))
-        observations = fetch_observations(http, since=_iso(args.since), until=_iso(args.until))
+        observations = fetch_observations(http)
         raw = load_raw(args.raw_dir, {o["sessionId"] for o in observations if o.get("sessionId")})
         selected = _select_sessions(args, observations, raw, repo)
         issues = {n: load_issue(run, n) for n in set(selected.values()) - {None}}
@@ -319,6 +360,18 @@ def main(argv: list[str] | None = None, *, http=None, run=None) -> int:
             publish_scores(http, [s for r in reports if r.issue for s in build_scores(r)])
     except EvalError as e:
         print(f"evaluate.py: error: {e}", file=sys.stderr)
+        return 2
+    except subprocess.CalledProcessError as e:
+        print(
+            f"evaluate.py: error: `{e.cmd[0]}` failed: {(e.stderr or '').strip()[:200]}",
+            file=sys.stderr,
+        )
+        return 2
+    except (subprocess.TimeoutExpired, ValueError) as e:
+        print(
+            f"evaluate.py: error: unreadable answer from gh, git or Langfuse ({type(e).__name__})",
+            file=sys.stderr,
+        )
         return 2
     return 0
 

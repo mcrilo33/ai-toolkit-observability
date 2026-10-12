@@ -61,7 +61,7 @@ to Langfuse as scores on the session. Standard library only; the stack must be u
 
 ```sh
 scripts/evaluate.py --issue 1                      # report + scores for one issue
-scripts/evaluate.py --since 2026-10-01             # every session of this repo since then
+scripts/evaluate.py --since 2026-10-01             # every session of this repo that started since then
 scripts/evaluate.py --issue 1 --no-publish --json  # machine-readable, pushes nothing
 scripts/evaluate.py --issue 7 --session <spoke_run_id>   # force the join when it fails
 ```
@@ -121,6 +121,8 @@ carrying `#<n>` (`test`, `feat`/`fix`, `refactor`; anything else is `other`).
   file has rotated away too, the session keeps its trace-level numbers and says what is missing.
 - `vcs.ref.head.name` is on a handful of events, so the issue join leans on the worktree path;
   a session that never touched it needs `--issue`.
+- `--since`/`--until` pick whole sessions by their first span; a session is always scored from all its spans.
+- Review time is the review agent's own spans; the main thread's work around them stays in its step.
 - A permission request nobody answered is a wait only when a `blocked_on_user` span confirms it.
 - A re-dispatch is the same spoke with a new Claude session; the gap before it is `other`.
 - Step boundaries are heuristics: no explicit step markers exist, and commit time is the end of

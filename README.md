@@ -130,6 +130,26 @@ carrying `#<n>` (`test`, `feat`/`fix`, `refactor`; anything else is `other`).
   the work it labels. A Bash `cat` of a rule is counted as a load even if the file was only skimmed.
 - Hooks are identified by event and matcher (`PreToolUse:Bash`), not by the script that ran.
 
+## Automatic scoring
+
+Raw JSONL rotates away after about three days, so a session nobody scores by then never
+gets its scores. `scripts/evaluate_sweep.sh` keeps them current: it runs
+`scripts/evaluate.py --since <7 days ago>` (a re-score is an upsert, so overlap is
+harmless) and exits with its status. A macOS launchd agent runs it daily at 03:17, or at
+wake-up if the Mac was asleep.
+
+```sh
+scripts/evaluate_sweep.sh            # one sweep now
+scripts/evaluate_sweep.sh install    # load the daily agent for this checkout (idempotent)
+scripts/evaluate_sweep.sh uninstall  # unload and remove it (idempotent)
+```
+
+Each sweep appends its report to `~/.ai-toolkit/evaluate-sweep.log`. With the stack down
+it logs the error and exits non-zero without writing a score. The agent
+(`launchd/com.ai-toolkit.evaluate-sweep.plist`, copied to `~/Library/LaunchAgents`) holds
+no secret: the keys stay in the Keychain and are read at run time. Re-run `install` if the
+checkout moves.
+
 ## Development
 
 ```sh

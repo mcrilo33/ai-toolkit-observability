@@ -22,7 +22,7 @@ LAUNCHCTL_STUB = """#!/usr/bin/env bash
 # Fake launchctl: `loaded` in $FAKE_LAUNCHD is the one bit of state; every call is logged.
 printf '%s\\n' "$*" >> "$FAKE_LAUNCHD/calls"
 case "$1" in
-  bootstrap) [ -z "${FAKE_LAUNCHCTL_REFUSES:-}" ] && touch "$FAKE_LAUNCHD/loaded" ;;
+  bootstrap) [ -n "${FAKE_LAUNCHCTL_REFUSES:-}" ] || touch "$FAKE_LAUNCHD/loaded" ;;
   bootout) [ -f "$FAKE_LAUNCHD/loaded" ] && rm "$FAKE_LAUNCHD/loaded" || exit 3 ;;
   print) [ -f "$FAKE_LAUNCHD/loaded" ] || exit 113 ;;
   *) echo "unexpected launchctl call: $*" >&2; exit 1 ;;

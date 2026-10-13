@@ -74,7 +74,8 @@ others with `--repo NAME=OWNER/REPO=PATH` (repeatable): `NAME` is the telemetry 
 its commits and landing are read from (`git -C`). Each session is joined against its own
 repo, so the same issue number in two repos never collides; `--issue N` matches that number
 in every mapped repo. A session of a repo that is not mapped is not scored but listed in a
-final `skipped:` line (and under `skipped` in `--json`), never dropped silently. The
+final `skipped:` line (and under `skipped` in `--json`), never dropped silently (except with
+`--issue`, which lists no skipped sessions: their issue is unknown). The
 Sessions table has a `repo` column.
 
 Keys come from the Keychain (`ai-toolkit-langfuse-LANGFUSE_INIT_PROJECT_{PUBLIC,SECRET}_KEY`)

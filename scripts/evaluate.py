@@ -350,7 +350,10 @@ def parse_repo(value: str) -> tuple[str, RepoRef]:
     slug, _, path = rest.partition("=")
     if not (name and slug.count("/") == 1 and all(slug.split("/")) and path):
         raise EvalError(f"--repo {value!r} is not NAME=OWNER/REPO=PATH (e.g. tk=acme/tk=~/tk)")
-    return name, RepoRef(slug, Path(path).expanduser())
+    checkout = Path(path).expanduser()
+    if not checkout.is_dir():
+        raise EvalError(f"--repo {value!r}: {checkout} is not a directory")
+    return name, RepoRef(slug, checkout)
 
 
 def _scoped(run, ref: RepoRef):

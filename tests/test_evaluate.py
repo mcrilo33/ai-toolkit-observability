@@ -700,7 +700,7 @@ class World:
             return json.dumps(self.issue_of[args[args.index("-R") + 1]])
         if args[:3] == ["gh", "repo", "view"]:
             return json.dumps({"name": "ai-toolkit-observability", "nameWithOwner": CWD_SLUG})
-        if "log" in args[:3]:
+        if "log" in args:
             return f"{int(T0 + 150)}\tfeat: x (#1)\n"
         return self.KEY if args[0] == "security" else ""
 
@@ -846,28 +846,27 @@ def add_session(world, session, repo, title, *, path_repo=None):
     world.issue_of[f"owner/{repo}"] = {**world.issue, "title": title}
 
 
-@pytest.mark.parametrize(
-    "value,expected",
-    [
-        pytest.param(
-            "ai-toolkit=owner/ai-toolkit=/src/tk",
-            ("ai-toolkit", ev.RepoRef("owner/ai-toolkit", Path("/src/tk"))),
-            id="plain",
-        ),
-        pytest.param(
-            "ai-toolkit=owner/ai-toolkit=~/Repos/tk",
-            ("ai-toolkit", ev.RepoRef("owner/ai-toolkit", Path.home() / "Repos" / "tk")),
-            id="tilde-expands",
-        ),
-    ],
-)
-def test_parse_repo_reads_name_slug_and_checkout(value, expected):
-    assert ev.parse_repo(value) == expected
+def test_parse_repo_reads_name_slug_and_checkout(tmp_path):
+    assert ev.parse_repo(f"tk=owner/tk={tmp_path}") == ("tk", ev.RepoRef("owner/tk", tmp_path))
+
+
+def test_parse_repo_expands_a_tilde_in_the_checkout(monkeypatch, tmp_path):
+    (tmp_path / "tk").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert ev.parse_repo("tk=owner/tk=~/tk")[1].path == tmp_path / "tk"
 
 
 @pytest.mark.parametrize(
     "value",
-    ["ai-toolkit", "ai-toolkit=owner/ai-toolkit", "=owner/tk=/p", "tk=owner=/p", "tk=owner/tk="],
+    [
+        "ai-toolkit",
+        "ai-toolkit=owner/ai-toolkit",
+        "=owner/tk=/p",
+        "tk=owner=/p",
+        "tk=owner/tk=",
+        "tk=owner/tk=/no/such/checkout",
+    ],
 )
 def test_main_rejects_a_malformed_repo_mapping_before_any_call(tmp_path, capsys, value):
     world = World(tmp_path)
@@ -882,6 +881,7 @@ def test_main_routes_each_session_to_the_gh_and_git_of_its_own_repo(tmp_path, ca
     world = World(tmp_path)
     add_session(world, OTHER_SPOKE, "ai-toolkit", "feat: toolkit work")
     checkout = tmp_path / "tk"
+    checkout.mkdir()
 
     assert world.main("--repo", f"ai-toolkit=owner/ai-toolkit={checkout}") == 0
 

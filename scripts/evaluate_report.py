@@ -129,6 +129,7 @@ def list_unused_rules(rules_dir: Path, used: dict[str, int]) -> list[str]:
 @dataclass(slots=True, kw_only=True)
 class SessionReport:
     session: str
+    repo: str
     issue: int | None
     title: str = ""
     gate_lane: str | None = None
@@ -247,6 +248,7 @@ def _session_row(rep: SessionReport) -> dict:
     acct = rep.accounting
     top = max(acct.steps, key=lambda s: acct.steps[s].cost_usd, default=None)
     return {
+        "repo": rep.repo,
         "issue": rep.issue,
         "gate_lane": rep.gate_lane,
         "landed": rep.landed,
@@ -330,6 +332,7 @@ def render_aggregates(agg: dict) -> str:
     """Render the per-session, per-step, agent, tool, hook and rule tables."""
     sessions = _table(
         [
+            "repo",
             "issue",
             "gate_lane",
             "landed",
@@ -342,6 +345,7 @@ def render_aggregates(agg: dict) -> str:
         ],
         [
             [
+                r["repo"],
                 f"#{r['issue']}" if r["issue"] else "—",
                 r["gate_lane"] or "unknown",
                 str(r["landed"]).lower(),
@@ -407,9 +411,16 @@ def render_aggregates(agg: dict) -> str:
     )
 
 
-def render_report(reports: list[SessionReport], agg: dict) -> str:
-    """Render the full text report: one block per session, then the aggregates."""
-    return "\n\n".join([*(render_session(r) for r in reports), render_aggregates(agg)])
+def render_report(reports: list[SessionReport], agg: dict, skipped: dict[str, str] | None = None) -> str:
+    """Render the full text report: one block per session, the aggregates, the skipped sessions.
+
+    `skipped` maps the sessions that were not scored to their unmapped repo name.
+    """
+    blocks = [*(render_session(r) for r in reports), render_aggregates(agg)]
+    if skipped:
+        by_repo = ", ".join(f"{n} ({c})" for n, c in sorted(Counter(skipped.values()).items()))
+        blocks.append(f"skipped: {len(skipped)} session(s) of unmapped repo(s): {by_repo}")
+    return "\n\n".join(blocks)
 
 
 def _jsonable(obj):
@@ -436,11 +447,13 @@ def _jsonable(obj):
     return obj
 
 
-def render_json(reports: list[SessionReport], agg: dict) -> str:
-    """Render the machine-readable report."""
+def render_json(reports: list[SessionReport], agg: dict, skipped: dict[str, str] | None = None) -> str:
+    """Render the machine-readable report, with the skipped sessions as {session, repo}."""
     sessions = []
     for rep in reports:
         d = _jsonable(rep)
         d.update({k: d["accounting"][k] for k in ("cost_usd", "active_s", "waiting_s", "other_s")})
         sessions.append(d)
-    return json.dumps({"sessions": sessions, "aggregates": _jsonable(agg)}, indent=2)
+    skipped_rows = [{"session": s, "repo": r} for s, r in (skipped or {}).items()]
+    report = {"sessions": sessions, "aggregates": _jsonable(agg), "skipped": skipped_rows}
+    return json.dumps(report, indent=2)

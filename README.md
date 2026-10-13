@@ -62,9 +62,20 @@ to Langfuse as scores on the session. Standard library only; the stack must be u
 ```sh
 scripts/evaluate.py --issue 1                      # report + scores for one issue
 scripts/evaluate.py --since 2026-10-01             # every session of this repo that started since then
+scripts/evaluate.py --since 2026-10-01 --repo ai-toolkit=mcrilo33/ai-toolkit=~/Repos/ai-toolkit   # and of ai-toolkit
 scripts/evaluate.py --issue 1 --no-publish --json  # machine-readable, pushes nothing
 scripts/evaluate.py --issue 7 --session <spoke_run_id>   # force the join when it fails
 ```
+
+All host repos share one collector and one Langfuse, and each event carries a `repo`
+attribute (the bare repo name). The repo of the current directory is always scored. Add
+others with `--repo NAME=OWNER/REPO=PATH` (repeatable): `NAME` is the telemetry name,
+`OWNER/REPO` the GitHub repo its issues are read from (`gh -R`), `PATH` the local checkout
+its commits and landing are read from (`git -C`). Each session is joined against its own
+repo, so the same issue number in two repos never collides; `--issue N` matches that number
+in every mapped repo. A session of a repo that is not mapped is not scored but listed in a
+final `skipped:` line (and under `skipped` in `--json`), never dropped silently. The
+Sessions table has a `repo` column.
 
 Keys come from the Keychain (`ai-toolkit-langfuse-LANGFUSE_INIT_PROJECT_{PUBLIC,SECRET}_KEY`)
 at runtime and travel only in an `Authorization` header. If the stack is down the run stops
@@ -134,8 +145,9 @@ carrying `#<n>` (`test`, `feat`/`fix`, `refactor`; anything else is `other`).
 
 Raw JSONL rotates away after about three days, so a session nobody scores by then never
 gets its scores. `scripts/evaluate_sweep.sh` keeps them current: it runs
-`scripts/evaluate.py --since <7 days ago>` (a re-score is an upsert, so overlap is
-harmless) and exits with its status. A macOS launchd agent runs it daily at 03:17, or at
+`scripts/evaluate.py --since <7 days ago>` over this repo and `ai-toolkit` (the `--repo`
+mapping is the `toolkit_repo` line of the script; edit it if your checkout lives elsewhere;
+a re-score is an upsert, so overlap is harmless) and exits with its status. A macOS launchd agent runs it daily at 03:17, or at
 wake-up if the Mac was asleep.
 
 ```sh

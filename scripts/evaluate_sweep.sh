@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Keep evaluation scores current: evaluate_sweep.sh [install|uninstall]
-#   (no argument)  one sweep: evaluate.py over the sessions of the last 7 days, logged to
-#                  ~/.ai-toolkit/evaluate-sweep.log; exits with evaluate.py's status
+#   (no argument)  one sweep: evaluate.py over the sessions of the last 7 days of this repo and
+#                  ai-toolkit, logged to ~/.ai-toolkit/evaluate-sweep.log; exits with its status
 #   install        load the daily launchd agent (launchd/<label>.plist) for this checkout
 #   uninstall      unload and remove it
 # evaluate.py upserts, so a re-run, an overlap or a missed day is harmless. It reads the Langfuse
@@ -14,6 +14,8 @@ die() { printf '%s: %s\n' "${0##*/}" "$*" >&2; exit 1; }
 
 label=com.ai-toolkit.evaluate-sweep
 window_days=7
+# The host repo scored besides this one: telemetry name=owner/repo=checkout (see evaluate.py --repo).
+toolkit_repo="ai-toolkit=mcrilo33/ai-toolkit=$HOME/Repos/ai-toolkit"
 log="$HOME/.ai-toolkit/evaluate-sweep.log"
 agent="$HOME/Library/LaunchAgents/$label.plist"
 domain="gui/$(id -u)"
@@ -31,7 +33,7 @@ sweep() {
   local since status=0
   since="$(since_date)"
   echo "$(stamp) sweep start since=$since"
-  python3 "$here/evaluate.py" --since "$since" || status=$?
+  python3 "$here/evaluate.py" --since "$since" --repo "$toolkit_repo" || status=$?
   if [ "$status" -eq 0 ]; then
     echo "$(stamp) sweep done"
   else

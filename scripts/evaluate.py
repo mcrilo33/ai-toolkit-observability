@@ -23,6 +23,7 @@ import subprocess
 import sys
 import urllib.parse
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 from evaluate_report import (
@@ -66,6 +67,7 @@ __all__ = [
     "Commit",
     "EvalError",
     "Lifecycle",
+    "RepoRef",
     "RuleSize",
     "SessionReport",
     "StepTime",
@@ -86,6 +88,7 @@ __all__ = [
     "make_http",
     "measure_rule_sizes",
     "parse_lifecycle",
+    "parse_repo",
     "percentile",
     "publish_scores",
     "render_report",
@@ -240,8 +243,11 @@ def _describe_partial_raw(raw: list[dict], leaves: list) -> str | None:
     )
 
 
-def analyse_session(session, observations, raw, issue, commits, run) -> SessionReport:
-    """Build the report of one session from its observations, raw records, issue and commits."""
+def analyse_session(session, repo, observations, raw, issue, commits, run) -> SessionReport:
+    """Build the report of one session from its observations, raw records, issue and commits.
+
+    `run` must already be scoped to the session's repo (see `_scoped`).
+    """
     leaves = build_leaves(observations, raw)
     life = parse_lifecycle(issue["comments"]) if issue else Lifecycle()
     stepper = Stepper(leaves, life, commits)
@@ -275,6 +281,7 @@ def analyse_session(session, observations, raw, issue, commits, run) -> SessionR
         notes.append("issue unknown: pass --issue N --session ID; no scores are published")
     return SessionReport(
         session=session,
+        repo=repo,
         issue=issue["number"] if issue else None,
         title=issue["title"] if issue else "",
         gate_lane=footer[1] if footer else None,
@@ -299,6 +306,14 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="append",
         help="only this spoke_run_id (repeatable); with one --issue it also forces the join",
     )
+    ap.add_argument(
+        "--repo",
+        action="append",
+        default=[],
+        metavar="NAME=OWNER/REPO=PATH",
+        help="map a telemetry repo name to its GitHub repo and local checkout (repeatable); "
+        "the repo of the current directory is always mapped",
+    )
     ap.add_argument("--since", help="ISO date or time: sessions starting after it")
     ap.add_argument("--until", help="ISO date or time: sessions starting before it")
     ap.add_argument("--url", default=LANGFUSE_URL, help="Langfuse base URL")
@@ -321,11 +336,44 @@ def _to_epoch(flag: str, value: str | None) -> float | None:
     return (parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.UTC)).timestamp()
 
 
-def _select_sessions(args, observations, raw, repo) -> dict[str, int | None]:
-    """Map each wanted session to its issue number (None when unknown).
+@dataclass(slots=True, frozen=True)
+class RepoRef:
+    """Where a repo's issues (GitHub `owner/repo`) and commits (local checkout) are read."""
 
-    The window and the repo check pick whole sessions by their first span; an explicit
-    `--session` bypasses both. A session is always scored from all of its spans.
+    slug: str
+    path: Path
+
+
+def parse_repo(value: str) -> tuple[str, RepoRef]:
+    """Parse a `--repo NAME=OWNER/REPO=PATH` value into (bare telemetry name, RepoRef)."""
+    name, _, rest = value.partition("=")
+    slug, _, path = rest.partition("=")
+    if not (name and slug.count("/") == 1 and all(slug.split("/")) and path):
+        raise EvalError(f"--repo {value!r} is not NAME=OWNER/REPO=PATH (e.g. tk=acme/tk=~/tk)")
+    return name, RepoRef(slug, Path(path).expanduser())
+
+
+def _scoped(run, ref: RepoRef):
+    """Wrap `run` so `gh` reads the repo's GitHub issues and `git` its local checkout."""
+
+    def scoped(args: list[str]) -> str:
+        if args[0] == "gh":
+            return run([*args, "-R", ref.slug])
+        if args[0] == "git":
+            return run(["git", "-C", str(ref.path), *args[1:]])
+        return run(args)
+
+    return scoped
+
+
+def _select_sessions(args, observations, raw, repos):
+    """Return (sessions to score, sessions skipped).
+
+    The first maps each wanted session to (repo name, issue number or None); the second maps
+    each in-window session of no mapped repo to its repo name(s). The window and the repo check
+    pick whole sessions by their first span; an explicit `--session` bypasses both and, with no
+    mapped repo of its own, joins in the first (the current directory's) repo. A session is
+    always scored from all of its spans.
     """
     since, until = _to_epoch("--since", args.since), _to_epoch("--until", args.until)
     by_session = defaultdict(list)
@@ -333,41 +381,56 @@ def _select_sessions(args, observations, raw, repo) -> dict[str, int | None]:
         if o.get("sessionId") and (not args.session or o["sessionId"] in args.session):
             by_session[o["sessionId"]].append(o)
     forced = args.issue[0] if args.session and args.issue and len(args.issue) == 1 else None
-    joined = {}
+    selected, skipped = {}, {}
     for session, obs in by_session.items():
         started = min(parse_time(o["startTime"]) for o in obs)
         in_window = (since is None or started >= since) and (until is None or started <= until)
-        in_repo = repo in {o["metadata"].get("repo") for o in obs}
-        if args.session or (in_window and in_repo):
-            joined[session] = find_issue(obs, raw.get(session, []), repo, forced)
-    return {s: n for s, n in joined.items() if not args.issue or n in args.issue}
+        names = {o["metadata"].get("repo") for o in obs} - {None}
+        mapped = sorted(names & repos.keys())
+        if not (args.session or in_window):
+            continue
+        if not (mapped or args.session):
+            skipped[session] = ", ".join(sorted(names)) or "unknown"
+            continue
+        name = mapped[0] if mapped else next(iter(repos))
+        selected[session] = (name, find_issue(obs, raw.get(session, []), name, forced))
+    selected = {s: v for s, v in selected.items() if not args.issue or v[1] in args.issue}
+    return selected, {} if args.issue else skipped
+
+
+def _analyse_selected(selected, observations, raw, repos, run) -> list[SessionReport]:
+    """Load each selected session's issue and commits from its own repo and build its report."""
+    runners = {name: _scoped(run, ref) for name, ref in repos.items()}
+    keys = {k for k in selected.values() if k[1] is not None}
+    issues = {k: load_issue(runners[k[0]], k[1]) for k in keys}
+    commits = {k: load_commits(runners[k[0]], k[1]) for k in issues}
+    reports = (
+        analyse_session(
+            s,
+            name,
+            [o for o in observations if o.get("sessionId") == s],
+            raw.get(s, []),
+            issues.get((name, n)),
+            commits.get((name, n), []),
+            runners[name],
+        )
+        for s, (name, n) in selected.items()
+    )
+    return sorted(reports, key=lambda r: r.started)
 
 
 def main(argv: list[str] | None = None, *, http=None, run=None) -> int:
     """Run the evaluation; returns 0 on success and 2 on an operator-actionable error."""
     args, run = parse_args(argv), run or run_command
     try:
-        repo = run(["gh", "repo", "view", "--json", "name", "-q", ".name"]).strip()
+        repos = dict(parse_repo(v) for v in args.repo)
+        here = json.loads(run(["gh", "repo", "view", "--json", "name,nameWithOwner"]))
+        repos = {here["name"]: RepoRef(here["nameWithOwner"], Path("."))} | repos
         http = http or make_http(args.url, *load_credentials(run))
         observations = fetch_observations(http)
         raw = load_raw(args.raw_dir, {o["sessionId"] for o in observations if o.get("sessionId")})
-        selected = _select_sessions(args, observations, raw, repo)
-        issues = {n: load_issue(run, n) for n in set(selected.values()) - {None}}
-        commits = {n: load_commits(run, n) for n in issues}
-        reports = sorted(
-            (
-                analyse_session(
-                    s,
-                    [o for o in observations if o.get("sessionId") == s],
-                    raw.get(s, []),
-                    issues.get(n),
-                    commits.get(n, []),
-                    run,
-                )
-                for s, n in selected.items()
-            ),
-            key=lambda r: r.started,
-        )
+        selected, skipped = _select_sessions(args, observations, raw, repos)
+        reports = _analyse_selected(selected, observations, raw, repos, run)
         agg = aggregate(
             reports,
             unused_rules=list_unused_rules(
@@ -375,7 +438,11 @@ def main(argv: list[str] | None = None, *, http=None, run=None) -> int:
             ),
             rule_sizes=measure_rule_sizes(args.always_on_dir),
         )
-        print(render_json(reports, agg) if args.json else render_report(reports, agg))
+        print(
+            render_json(reports, agg, skipped)
+            if args.json
+            else render_report(reports, agg, skipped)
+        )
         if not args.no_publish:
             publish_scores(http, [s for r in reports if r.issue for s in build_scores(r)])
     except EvalError as e:

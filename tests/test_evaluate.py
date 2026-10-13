@@ -548,7 +548,7 @@ def test_sessions_table_orders_rows_by_start_time_and_picks_the_costliest_step()
         "review_rounds", "redispatches", "top_step",
     ]  # fmt: skip
     assert table[1].split()[:3] == ["#1", "plan", "false"]
-    assert table[2].split() == ["#2", "plan", "true", "4.00", "2.00", "0.50", "2", "1", "review"]
+    assert table[2].split() == ["#2", "plan", "true", "4.00", "2.0", "0.5", "2", "1", "review"]
 
 
 def test_sessions_table_keeps_a_raw_only_session_with_dashes_for_what_is_missing():

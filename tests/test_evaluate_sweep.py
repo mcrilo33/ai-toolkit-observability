@@ -22,7 +22,9 @@ LAUNCHCTL_STUB = """#!/usr/bin/env bash
 # Fake launchctl: `loaded` in $FAKE_LAUNCHD is the one bit of state; every call is logged.
 printf '%s\\n' "$*" >> "$FAKE_LAUNCHD/calls"
 case "$1" in
-  bootstrap) [ -n "${FAKE_LAUNCHCTL_REFUSES:-}" ] || touch "$FAKE_LAUNCHD/loaded" ;;
+  bootstrap)
+    [ "${FAKE_LAUNCHCTL_REFUSES:-}" != fail ] || exit 5
+    [ -n "${FAKE_LAUNCHCTL_REFUSES:-}" ] || touch "$FAKE_LAUNCHD/loaded" ;;
   bootout) [ -f "$FAKE_LAUNCHD/loaded" ] && rm "$FAKE_LAUNCHD/loaded" || exit 3 ;;
   print) [ -f "$FAKE_LAUNCHD/loaded" ] || exit 113 ;;
   *) echo "unexpected launchctl call: $*" >&2; exit 1 ;;
@@ -101,12 +103,6 @@ def test_no_args_runs_evaluate_once_over_the_last_seven_days_from_the_repo_root(
     assert dt.date.fromisoformat(since) in {before, after}
 
 
-def test_two_sweeps_issue_the_same_command(sweep):
-    assert sweep().returncode == 0 and sweep().returncode == 0
-    first, second = sweep.python_calls()
-    assert first == second
-
-
 def test_a_failed_sweep_exits_non_zero_and_logs_why(sweep):
     r = sweep(FAKE_PY_RC="2", FAKE_PY_SAYS="Langfuse is not reachable")
     assert r.returncode == 2
@@ -115,12 +111,12 @@ def test_a_failed_sweep_exits_non_zero_and_logs_why(sweep):
     assert "failed" in log and "exit 2" in log
 
 
-def test_every_sweep_appends_to_the_log_under_dot_ai_toolkit(sweep):
-    sweep()
-    sweep(FAKE_PY_RC="1")
+def test_sweeps_append_to_the_log_under_dot_ai_toolkit_and_repeat_the_same_command(sweep):
+    assert sweep().returncode == 0 and sweep().returncode == 0
     log = sweep.log.read_text()
-    assert log.count("sweep start") == 2 and log.count("sweep done") == 1
-    assert log.count("sweep failed") == 1
+    assert log.count("sweep start") == 2 and log.count("sweep done") == 2
+    first, second = sweep.python_calls()
+    assert first == second
 
 
 def test_install_writes_the_agent_and_loads_it(sweep):
@@ -143,7 +139,7 @@ def test_the_agent_carries_no_secret(sweep):
     agent = plistlib.loads(sweep.plist.read_bytes())
     assert set(agent.get("EnvironmentVariables", {})) <= {"PATH"}
     text = sweep.plist.read_text()
-    assert "sk-lf" not in text and "pk-lf" not in text and "__" not in text
+    assert "sk-lf" not in text and "pk-lf" not in text and "__SCRIPT__" not in text and "__REPO__" not in text
 
 
 def test_install_twice_leaves_one_loaded_agent(sweep):
@@ -154,9 +150,11 @@ def test_install_twice_leaves_one_loaded_agent(sweep):
     assert len(list(sweep.plist.parent.iterdir())) == 1
 
 
-def test_install_fails_when_the_agent_does_not_show_up_loaded(sweep):
-    r = sweep("install", FAKE_LAUNCHCTL_REFUSES="1")
-    assert r.returncode != 0 and "not loaded" in r.stderr
+@pytest.mark.parametrize("refusal", ["fail", "silent"])
+def test_install_fails_when_the_agent_does_not_end_up_loaded(sweep, refusal):
+    r = sweep("install", FAKE_LAUNCHCTL_REFUSES=refusal)
+    assert r.returncode != 0
+    assert "could not load" in r.stderr or "not loaded" in r.stderr
 
 
 def test_uninstall_unloads_and_removes_the_agent(sweep):

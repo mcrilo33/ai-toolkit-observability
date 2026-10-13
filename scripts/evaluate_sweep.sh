@@ -40,6 +40,15 @@ sweep() {
   return "$status"
 }
 
+# bootout can return before the service is gone, and a bootstrap right after it fails with an I/O error.
+wait_unloaded() {
+  local tries=0
+  while launchctl print "$domain/$label" > /dev/null 2>&1 && [ "$tries" -lt 20 ]; do
+    tries=$((tries + 1))
+    sleep 0.5
+  done
+}
+
 install() {
   case "$repo" in
     *[\&\<\>\|\\\"]*) die "the checkout path contains a character the agent file cannot hold: $repo" ;;
@@ -47,6 +56,7 @@ install() {
   mkdir -p "$(dirname "$agent")" "$(dirname "$log")"
   # A loaded agent must be unloaded before its file is replaced; "not loaded" is not an error.
   launchctl bootout "$domain/$label" 2> /dev/null || true
+  wait_unloaded
   sed -e "s|__SCRIPT__|$here/evaluate_sweep.sh|" -e "s|__REPO__|$repo|" \
     "$repo/launchd/$label.plist" > "$agent"
   launchctl bootstrap "$domain" "$agent" || die "launchctl could not load $agent"
@@ -56,6 +66,7 @@ install() {
 
 uninstall() {
   launchctl bootout "$domain/$label" 2> /dev/null || true
+  wait_unloaded
   rm -f "$agent"
   ! launchctl print "$domain/$label" > /dev/null 2>&1 || die "$label is still loaded after uninstall"
   echo "uninstalled $label"

@@ -147,8 +147,10 @@ scripts/evaluate_sweep.sh uninstall  # unload and remove it (idempotent)
 Each sweep appends its report to `~/.ai-toolkit/evaluate-sweep.log`. With the stack down
 it logs the error and exits non-zero without writing a score. The agent
 (`launchd/com.ai-toolkit.evaluate-sweep.plist`, copied to `~/Library/LaunchAgents`) holds
-no secret: the keys stay in the Keychain and are read at run time. Re-run `install` if the
-checkout moves.
+no secret: the keys stay in the Keychain and are read at run time. Run `install` from the
+main checkout, not a worktree that will be removed, and re-run it if the checkout moves. The
+agent's `PATH` is `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`, so `python3` (3.12+) and
+`gh` must be found there.
 
 ## Development
 

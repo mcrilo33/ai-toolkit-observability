@@ -90,7 +90,7 @@ def test_unknown_arguments_exit_2_with_usage_and_touch_nothing(sweep, args):
     assert not sweep.python_calls() and not sweep.launchctl_calls()
 
 
-def test_no_args_runs_evaluate_once_over_the_last_seven_days_from_the_repo_root(sweep):
+def test_no_args_runs_evaluate_once_over_the_last_seven_days_of_both_repos_from_the_repo_root(sweep):
     before = _seven_days_ago()
     r = sweep()
     after = _seven_days_ago()
@@ -98,9 +98,11 @@ def test_no_args_runs_evaluate_once_over_the_last_seven_days_from_the_repo_root(
     [call] = sweep.python_calls()
     cwd, argv = call.split("|")
     assert Path(cwd).resolve() == REPO
-    script, flag, since = argv.split(" ")
-    assert (script, flag) == (str(REPO / "scripts" / "evaluate.py"), "--since")
+    script, since_flag, since, repo_flag, mapping = argv.split(" ")
+    assert (script, since_flag) == (str(REPO / "scripts" / "evaluate.py"), "--since")
     assert dt.date.fromisoformat(since) in {before, after}
+    assert repo_flag == "--repo"
+    assert mapping == f"ai-toolkit=mcrilo33/ai-toolkit={sweep.home}/Repos/ai-toolkit"
 
 
 def test_a_failed_sweep_exits_non_zero_and_logs_why(sweep):

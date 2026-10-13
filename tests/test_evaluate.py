@@ -3,12 +3,15 @@ import itertools
 import json
 import subprocess
 import urllib.error
+from pathlib import Path
 
 import evaluate as ev
 import pytest
 
 T0 = dt.datetime(2026, 10, 6, 14, 52, tzinfo=dt.UTC).timestamp()
 SPOKE = "8065ac0d-8af2-42c4-b495-c661f02002ec"
+OTHER_SPOKE = "11111111-2222-3333-4444-555555555555"
+CWD_SLUG = "owner/ai-toolkit-observability"
 CLAUDE_A = "3defdb84-59b3-4c9a-8c52-84c3ae0de791"
 CLAUDE_B = "d74fa1e6-85c6-4e6e-a7bb-34e36625950b"
 _ids = itertools.count(1)
@@ -396,6 +399,7 @@ def make_report(**kw):
     acct.steps["implement"].active_s = 60.0
     base = dict(
         session=SPOKE,
+        repo="ai-toolkit-observability",
         issue=1,
         title="t",
         gate_lane="plan",
@@ -530,6 +534,7 @@ def test_sessions_table_orders_rows_by_start_time_and_picks_the_costliest_step()
 
     assert [r["issue"] for r in rows] == [1, 2]
     assert rows[1] == dict(
+        repo="ai-toolkit-observability",
         issue=2,
         gate_lane="plan",
         landed=True,
@@ -544,11 +549,11 @@ def test_sessions_table_orders_rows_by_start_time_and_picks_the_costliest_step()
     text = ev.render_report([early, late], agg)
     table = text.split("Sessions\n")[1].split("\n\n")[0].splitlines()
     assert table[0].split() == [
-        "issue", "gate_lane", "landed", "cost_usd", "active_min", "waiting_min",
+        "repo", "issue", "gate_lane", "landed", "cost_usd", "active_min", "waiting_min",
         "review_rounds", "redispatches", "top_step",
     ]  # fmt: skip
-    assert table[1].split()[:3] == ["#1", "plan", "false"]
-    assert table[2].split() == ["#2", "plan", "true", "4.00", "2.0", "0.5", "2", "1", "review"]
+    assert table[1].split()[:4] == ["ai-toolkit-observability", "#1", "plan", "false"]
+    assert table[2].split()[1:] == ["#2", "plan", "true", "4.00", "2.0", "0.5", "2", "1", "review"]
 
 
 def test_sessions_table_keeps_a_raw_only_session_with_dashes_for_what_is_missing():
@@ -560,7 +565,7 @@ def test_sessions_table_keeps_a_raw_only_session_with_dashes_for_what_is_missing
     assert rows[0]["issue"] is None and rows[0]["gate_lane"] is None
     assert rows[0]["top_step"] is None and rows[0]["cost_usd"] == 0.0
     line = ev.render_report([bare], agg).split("Sessions\n")[1].splitlines()[1].split()
-    assert line[:3] == ["—", "unknown", "false"] and line[-1] == "—"
+    assert line[1:4] == ["—", "unknown", "false"] and line[-1] == "—"
 
 
 def raw_line(session, name, attrs, offset):
@@ -659,6 +664,7 @@ class World:
             "body": "## Problem\n\nScope: a\nGate: plan\n",
             "comments": [comment(60, 'Gate answered "approve"'), comment(300, "landed in abc1234")],
         }
+        self.issue_of = {CWD_SLUG: self.issue}
         self.http_calls, self.run_calls, self.down = [], [], down
         self.raw_dir, self.rules_dir, self.always_dir = (
             tmp_path / "raw",
@@ -691,10 +697,10 @@ class World:
     def run(self, args):
         self.run_calls.append(args)
         if args[:3] == ["gh", "issue", "view"]:
-            return json.dumps(self.issue)
+            return json.dumps(self.issue_of[args[args.index("-R") + 1]])
         if args[:3] == ["gh", "repo", "view"]:
-            return "ai-toolkit-observability\n"
-        if args[:2] == ["git", "log"]:
+            return json.dumps({"name": "ai-toolkit-observability", "nameWithOwner": CWD_SLUG})
+        if "log" in args[:3]:
             return f"{int(T0 + 150)}\tfeat: x (#1)\n"
         return self.KEY if args[0] == "security" else ""
 
@@ -826,6 +832,107 @@ def test_main_repo_filter_yields_to_an_explicit_session(tmp_path, extra, posted)
     assert world.main(*extra) == 0
 
     assert len(world.posted_ids()) == posted
+
+
+def add_session(world, session, repo, title, *, path_repo=None):
+    """A second worker session of `repo`, in issue 1's worktree of `path_repo`, with its own issue."""
+    for o in [
+        make_obs("tool:Bash", 0, 5, full_command=f"cd /w/workspaces/{path_repo or repo}/1-feat-y"),
+        make_obs("claude_code.llm_request", 10, 20, type_="GENERATION", cost=0.5),
+    ]:
+        o["sessionId"] = session
+        o["metadata"]["repo"] = repo
+        world.observations.append(o)
+    world.issue_of[f"owner/{repo}"] = {**world.issue, "title": title}
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        pytest.param(
+            "ai-toolkit=owner/ai-toolkit=/src/tk",
+            ("ai-toolkit", ev.RepoRef("owner/ai-toolkit", Path("/src/tk"))),
+            id="plain",
+        ),
+        pytest.param(
+            "ai-toolkit=owner/ai-toolkit=~/Repos/tk",
+            ("ai-toolkit", ev.RepoRef("owner/ai-toolkit", Path.home() / "Repos" / "tk")),
+            id="tilde-expands",
+        ),
+    ],
+)
+def test_parse_repo_reads_name_slug_and_checkout(value, expected):
+    assert ev.parse_repo(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["ai-toolkit", "ai-toolkit=owner/ai-toolkit", "=owner/tk=/p", "tk=owner=/p", "tk=owner/tk="],
+)
+def test_main_rejects_a_malformed_repo_mapping_before_any_call(tmp_path, capsys, value):
+    world = World(tmp_path)
+
+    assert world.main("--repo", value) == 2
+
+    assert value in capsys.readouterr().err
+    assert world.http_calls == [] and world.posted_ids() == []
+
+
+def test_main_routes_each_session_to_the_gh_and_git_of_its_own_repo(tmp_path, capsys):
+    world = World(tmp_path)
+    add_session(world, OTHER_SPOKE, "ai-toolkit", "feat: toolkit work")
+    checkout = tmp_path / "tk"
+
+    assert world.main("--repo", f"ai-toolkit=owner/ai-toolkit={checkout}") == 0
+
+    out = capsys.readouterr().out
+    assert len(world.posted_ids()) == 32  # two sessions of issue #1 in two repos do not collide
+    assert "feat: toolkit work" in out and "feat: x" in out
+    views = [a[a.index("-R") + 1] for a in world.run_calls if a[:3] == ["gh", "issue", "view"]]
+    assert sorted(views) == ["owner/ai-toolkit", CWD_SLUG]
+    git_dirs = sorted(a[2] for a in world.run_calls if a[:2] == ["git", "-C"])
+    assert git_dirs == sorted([".", ".", str(checkout), str(checkout)])  # log + merge-base each
+    sessions = out.split("Sessions\n")[1].split("\n\n")[0].splitlines()
+    assert sorted(line.split()[0] for line in sessions[1:]) == [
+        "ai-toolkit", "ai-toolkit-observability",
+    ]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "repo,shown",
+    [
+        pytest.param("some-other-repo", "some-other-repo", id="named"),
+        pytest.param(None, "unknown", id="no-repo-attribute"),
+    ],
+)
+def test_main_reports_a_session_of_an_unmapped_repo_as_skipped(tmp_path, capsys, repo, shown):
+    world = World(tmp_path)
+    for o in world.observations:
+        o["metadata"]["repo"] = repo
+        if repo is None:
+            del o["metadata"]["repo"]
+
+    assert world.main() == 0
+
+    assert f"skipped: 1 session(s) of unmapped repo(s): {shown} (1)" in capsys.readouterr().out
+    assert world.posted_ids() == []
+
+
+@pytest.mark.parametrize(
+    "window,skipped",
+    [
+        pytest.param([], [{"session": SPOKE, "repo": "some-other-repo"}], id="in-window"),
+        pytest.param(["--since", "2026-10-06T14:55:00Z"], [], id="outside-window-is-not-reported"),
+    ],
+)
+def test_main_json_lists_skipped_sessions_inside_the_window_only(tmp_path, capsys, window, skipped):
+    world = World(tmp_path)
+    for o in world.observations:
+        o["metadata"]["repo"] = "some-other-repo"
+
+    assert world.main("--json", *window) == 0
+
+    assert json.loads(capsys.readouterr().out)["skipped"] == skipped
 
 
 def test_main_turns_a_failing_gh_into_a_clear_error_and_posts_nothing(tmp_path, capsys):

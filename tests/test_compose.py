@@ -23,6 +23,17 @@ SECRETS = {
 }
 
 
+# Postgres >= 10 versions as major.minor, so a two-part tag is its full pin.
+TWO_PART_TAG_SERVICES = {"postgres"}
+
+
+def is_pinned(name: str, image: str) -> bool:
+    if "@sha256:" in image:
+        return True
+    parts = 2 if name in TWO_PART_TAG_SERVICES else 3
+    return re.search(rf":\d+(\.\d+){{{parts - 1},}}$", image) is not None
+
+
 @pytest.fixture(scope="module")
 def compose():
     return yaml.safe_load(COMPOSE.read_text())

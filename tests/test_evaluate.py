@@ -512,6 +512,57 @@ def test_render_report_has_the_four_component_tables_and_the_zero_use_list():
     assert "landed=true" in text and "review_rounds=2" in text
 
 
+def sessions_rows(*reports):
+    agg = ev.aggregate(list(reports), unused_rules=[], rule_sizes=[])
+    return agg, agg["sessions"]
+
+
+def test_sessions_table_orders_rows_by_start_time_and_picks_the_costliest_step():
+    late = make_report(session="late", issue=2, started=200.0)
+    late.accounting.steps["review"].cost_usd = 3.0
+    late.accounting.steps["implement"].cost_usd = 1.0
+    late.accounting.steps["implement"].active_s = 120.0
+    late.accounting.steps["implement"].waiting_s = 30.0
+    early = make_report(session="early", issue=1, started=100.0, landed=False)
+    early.accounting.steps["implement"].cost_usd = 2.0
+
+    agg, rows = sessions_rows(late, early)
+
+    assert [r["issue"] for r in rows] == [1, 2]
+    assert rows[1] == dict(
+        issue=2,
+        gate_lane="plan",
+        landed=True,
+        cost_usd=4.0,
+        active_min=pytest.approx(2.0),
+        waiting_min=pytest.approx(0.5),
+        review_rounds=2,
+        redispatches=1,
+        top_step="review",
+    )
+    assert rows[0]["landed"] is False and rows[0]["top_step"] == "implement"
+    text = ev.render_report([early, late], agg)
+    table = text.split("Sessions\n")[1].split("\n\n")[0].splitlines()
+    assert table[0].split() == [
+        "issue", "gate_lane", "landed", "cost_usd", "active_min", "waiting_min",
+        "review_rounds", "redispatches", "top_step",
+    ]  # fmt: skip
+    assert table[1].split()[:3] == ["#1", "plan", "false"]
+    assert table[2].split() == ["#2", "plan", "true", "4.00", "2.0", "0.5", "2", "1", "review"]
+
+
+def test_sessions_table_keeps_a_raw_only_session_with_dashes_for_what_is_missing():
+    bare = make_report(issue=None, gate_lane=None, landed=False, started=0.0)
+    bare.accounting.steps["implement"].active_s = 0.0
+
+    agg, rows = sessions_rows(bare)
+
+    assert rows[0]["issue"] is None and rows[0]["gate_lane"] is None
+    assert rows[0]["top_step"] is None and rows[0]["cost_usd"] == 0.0
+    line = ev.render_report([bare], agg).split("Sessions\n")[1].splitlines()[1].split()
+    assert line[:3] == ["—", "unknown", "false"] and line[-1] == "—"
+
+
 def raw_line(session, name, attrs, offset):
     """One OTLP log line as the collector's file exporter writes it."""
     pairs = [{"key": k, "value": {"stringValue": v}} for k, v in attrs.items()]
@@ -695,6 +746,9 @@ def test_main_keeps_trace_numbers_when_the_raw_jsonl_rotated_away(tmp_path, caps
     assert world.main("--json") == 0
 
     report = json.loads(capsys.readouterr().out)
+    (row,) = report["aggregates"]["sessions"]
+    assert row["issue"] == 1 and row["cost_usd"] == pytest.approx(0.75)
+    assert row["top_step"] in ev.STEPS
     assert any("raw JSONL" in n for n in report["sessions"][0]["notes"])
     assert any("lower bound" in n for n in report["sessions"][0]["notes"])
     assert report["sessions"][0]["cost_usd"] == pytest.approx(0.75)

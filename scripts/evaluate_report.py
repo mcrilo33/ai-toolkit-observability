@@ -242,10 +242,27 @@ def _fold(
     return rows
 
 
+def _session_row(rep: SessionReport) -> dict:
+    """One comparison row from an already-computed report; `top_step` is None without cost."""
+    acct = rep.accounting
+    top = max(acct.steps, key=lambda s: acct.steps[s].cost_usd, default=None)
+    return {
+        "issue": rep.issue,
+        "gate_lane": rep.gate_lane,
+        "landed": rep.landed,
+        "cost_usd": acct.cost_usd,
+        "active_min": acct.active_s / 60,
+        "waiting_min": acct.waiting_s / 60,
+        "review_rounds": rep.review_rounds,
+        "redispatches": rep.redispatches,
+        "top_step": top if top and acct.steps[top].cost_usd > 0 else None,
+    }
+
+
 def aggregate(
     reports: list[SessionReport], *, unused_rules: list[str], rule_sizes: list[RuleSize]
 ) -> dict:
-    """Aggregate steps, agents, tools, hooks and rules across sessions."""
+    """Aggregate sessions (one row each, by start time), steps, agents, tools, hooks and rules."""
     steps = {s: StepTime() for s in STEPS}
     for rep in reports:
         for step, slot in rep.accounting.steps.items():
@@ -259,7 +276,7 @@ def aggregate(
         )
         del row["durations"]
     return {
-        "sessions": len(reports),
+        "sessions": [_session_row(r) for r in sorted(reports, key=lambda r: r.started)],
         "steps": steps,
         "agents": _fold(
             [r.attribution.agents for r in reports],
@@ -310,7 +327,34 @@ def render_session(rep: SessionReport) -> str:
 
 
 def render_aggregates(agg: dict) -> str:
-    """Render the per-step, agent, tool, hook and rule tables."""
+    """Render the per-session, per-step, agent, tool, hook and rule tables."""
+    sessions = _table(
+        [
+            "issue",
+            "gate_lane",
+            "landed",
+            "cost_usd",
+            "active_min",
+            "waiting_min",
+            "review_rounds",
+            "redispatches",
+            "top_step",
+        ],
+        [
+            [
+                f"#{r['issue']}" if r["issue"] else "—",
+                r["gate_lane"] or "unknown",
+                str(r["landed"]).lower(),
+                r["cost_usd"],
+                f"{r['active_min']:.1f}",
+                f"{r['waiting_min']:.1f}",
+                r["review_rounds"],
+                r["redispatches"],
+                r["top_step"] or "—",
+            ]
+            for r in agg["sessions"]
+        ],
+    )
     steps = _table(
         ["step", "cost_usd", "active_s", "waiting_s", "other_s"],
         [[s, t.cost_usd, t.active_s, t.waiting_s, t.other_s] for s, t in agg["steps"].items()],
@@ -350,7 +394,8 @@ def render_aggregates(agg: dict) -> str:
     )
     return "\n\n".join(
         [
-            f"== Aggregates over {agg['sessions']} session(s) ==",
+            f"== Aggregates over {len(agg['sessions'])} session(s) ==",
+            "Sessions\n" + sessions,
             "Steps\n" + steps,
             "Agents\n" + agents,
             "Tools\n" + tools,

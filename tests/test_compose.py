@@ -45,12 +45,26 @@ def test_no_service_uses_host_networking_or_exposes_ports(compose):
         assert "expose" not in svc, name
 
 
+@pytest.mark.parametrize(
+    "name,image,pinned",
+    [
+        ("redis", "docker.io/redis:7.4.9", True),
+        ("clickhouse", "docker.io/clickhouse/clickhouse-server:25.12.9.61", True),
+        ("minio", "cgr.dev/chainguard/minio@sha256:" + "a" * 64, True),
+        ("postgres", "docker.io/postgres:17.9", True),
+        ("redis", "docker.io/redis:7.4", False),
+        ("redis", "docker.io/redis:7", False),
+        ("redis", "docker.io/redis:latest", False),
+        ("redis", "docker.io/redis", False),
+    ],
+)
+def test_is_pinned_requires_a_full_version_or_a_digest(name, image, pinned):
+    assert is_pinned(name, image) is pinned
+
+
 def test_every_image_is_pinned(compose):
     for name, svc in compose["services"].items():
-        image = svc["image"]
-        pinned = "@sha256:" in image or re.search(r":\d+\.\d+", image)
-        assert pinned, f"{name}: {image} is not pinned to a major.minor(.patch) tag or a digest"
-        assert not image.endswith(":latest"), name
+        assert is_pinned(name, svc["image"]), f"{name}: {svc['image']} is not pinned"
 
 
 def test_langfuse_is_v4(compose):

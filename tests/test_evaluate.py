@@ -442,6 +442,15 @@ def test_build_scores_is_idempotent_and_typed():
     assert all(s["sessionId"] == SPOKE for s in first)
 
 
+def test_build_scores_carry_the_environment_only_when_the_session_has_one():
+    tagged = ev.build_scores(make_report(environment="ai-toolkit"))
+    untagged = ev.build_scores(make_report())
+
+    assert {s["environment"] for s in tagged} == {"ai-toolkit"}
+    assert not any("environment" in s for s in untagged)
+    assert [s["id"] for s in tagged] == [s["id"] for s in untagged]
+
+
 class FakeHttp:
     def __init__(self, down=False):
         self.calls, self.down = [], down
@@ -733,6 +742,9 @@ def test_main_reports_one_session_and_a_rerun_posts_the_same_score_ids(tmp_path,
     assert "raw JSONL covers only" in out and "lower bound" in out
     assert "PreToolUse:Bash" in out and "bug-triage" in out and "Zero-use rules: workflow" in out
     assert len(first) == 16 and world.posted_ids() == sorted(first * 2)
+    assert {c[2]["environment"] for c in world.http_calls if c[0] == "POST"} == {
+        "ai-toolkit-observability"
+    }
     assert World.KEY not in out and not any(World.KEY in " ".join(a) for a in world.run_calls)
 
 
@@ -832,6 +844,7 @@ def test_main_repo_filter_yields_to_an_explicit_session(tmp_path, extra, posted)
     assert world.main(*extra) == 0
 
     assert len(world.posted_ids()) == posted
+    assert not any("environment" in c[2] for c in world.http_calls if c[0] == "POST")
 
 
 def add_session(world, session, repo, title, *, path_repo=None):
@@ -896,6 +909,8 @@ def test_main_routes_each_session_to_the_gh_and_git_of_its_own_repo(tmp_path, ca
     assert sorted(line.split()[0] for line in sessions[1:]) == [
         "ai-toolkit", "ai-toolkit-observability",
     ]  # fmt: skip
+    posted = {(c[2]["sessionId"], c[2]["environment"]) for c in world.http_calls if c[0] == "POST"}
+    assert posted == {(SPOKE, "ai-toolkit-observability"), (OTHER_SPOKE, "ai-toolkit")}
 
 
 @pytest.mark.parametrize(

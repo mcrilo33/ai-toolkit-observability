@@ -142,18 +142,20 @@ class SessionReport:
     attribution: Attribution
     notes: list[str] = field(default_factory=list)
     started: float = 0.0
+    environment: str | None = None  # the repo named by the session's own spans; None if unnamed
 
 
-def _score(session: str, name: str, value, data_type: str, issue: int | None) -> dict:
-    digest = hashlib.sha1(f"ai-toolkit-eval:{session}:{name}".encode()).hexdigest()
-    return {
+def _score(rep: SessionReport, name: str, value, data_type: str) -> dict:
+    digest = hashlib.sha1(f"ai-toolkit-eval:{rep.session}:{name}".encode()).hexdigest()
+    score = {
         "id": digest,
-        "sessionId": session,
+        "sessionId": rep.session,
         "name": name,
         "value": value,
         "dataType": data_type,
-        "comment": f"evaluate.py, issue #{issue}",
+        "comment": f"evaluate.py, issue #{rep.issue}",
     }
+    return score | {"environment": rep.environment} if rep.environment else score
 
 
 def build_scores(rep: SessionReport) -> list[dict]:
@@ -170,13 +172,9 @@ def build_scores(rep: SessionReport) -> list[dict]:
     for step, slot in acct.steps.items():
         numeric[f"step_{step}_cost_usd"] = slot.cost_usd
         numeric[f"step_{step}_active_s"] = slot.active_s
-    scores = [
-        _score(rep.session, n, round(float(v), 6), "NUMERIC", rep.issue) for n, v in numeric.items()
-    ]
-    scores.append(_score(rep.session, "landed", int(rep.landed), "BOOLEAN", rep.issue))
-    scores.append(
-        _score(rep.session, "gate_lane", rep.gate_lane or "unknown", "CATEGORICAL", rep.issue)
-    )
+    scores = [_score(rep, n, round(float(v), 6), "NUMERIC") for n, v in numeric.items()]
+    scores.append(_score(rep, "landed", int(rep.landed), "BOOLEAN"))
+    scores.append(_score(rep, "gate_lane", rep.gate_lane or "unknown", "CATEGORICAL"))
     return scores
 
 

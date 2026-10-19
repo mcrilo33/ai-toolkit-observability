@@ -279,9 +279,11 @@ def analyse_session(session, repo, observations, raw, issue, commits, run) -> Se
         )
     if not issue:
         notes.append("issue unknown: pass --issue N --session ID; no scores are published")
+    named = any(o["metadata"].get("repo") == repo for o in observations)
     return SessionReport(
         session=session,
         repo=repo,
+        environment=repo if named else None,
         issue=issue["number"] if issue else None,
         title=issue["title"] if issue else "",
         gate_lane=footer[1] if footer else None,

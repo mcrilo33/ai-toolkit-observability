@@ -901,7 +901,9 @@ def test_main_rejects_a_window_it_cannot_parse(tmp_path, capsys):
     "extra,posted",
     [
         pytest.param([], 0, id="other-repo-skipped"),
-        pytest.param(["--session", SPOKE, "--issue", "1"], WORLD_SCORES, id="forced-session-bypasses-repo"),
+        pytest.param(
+            ["--session", SPOKE, "--issue", "1"], WORLD_SCORES, id="forced-session-bypasses-repo"
+        ),
     ],
 )
 def test_main_repo_filter_yields_to_an_explicit_session(tmp_path, extra, posted):

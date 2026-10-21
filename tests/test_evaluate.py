@@ -451,6 +451,69 @@ def test_build_scores_carry_the_environment_only_when_the_session_has_one():
     assert [s["id"] for s in tagged] == [s["id"] for s in untagged]
 
 
+def test_build_scores_publish_component_scores_summed_over_steps_without_zeros():
+    review = make_obs("sub-agent:code-review", 500, 500.01)
+    slow = make_obs("tool:WebFetch", 100, 140)
+    quick = make_obs("tool:Grep", 150, 151)
+    failing = make_obs("tool:Bash", 30, 31)
+    observations = [
+        make_obs("sub-agent:llm", 500, 510, type_="GENERATION", parent=review["id"], cost=0.4),
+        make_obs("claude_code.llm_request", 0, 5, type_="GENERATION", cost=0.1),
+        review,
+        make_obs("tool:Read", 1, 2, file_path="/w/.ai-toolkit/rules/bug-triage.md"),
+        failing,
+        make_obs("claude_code.tool.execution", 30, 31, parent=failing["id"], level="ERROR"),
+        make_obs("tool:Bash", 2000, 2001),
+        slow,
+        make_obs("claude_code.tool.blocked_on_user", 105, 135, parent=slow["id"]),
+        quick,
+        make_obs("claude_code.tool.blocked_on_user", 150, 150.5, parent=quick["id"]),
+    ]
+    raw = [
+        hook_record(1, "PreToolUse:Bash", 40),
+        hook_record(2, "PreToolUse:Bash", 60, blocking="1"),
+        hook_record(3, "SessionStart", 7),
+    ]
+    attribution = run_attribution(
+        ev.build_leaves(observations), raw, [comment(1000, "Gate answered")]
+    )
+
+    scores = ev.build_scores(make_report(attribution=attribution))
+
+    published = {s["name"]: s["value"] for s in scores}
+    kinds = {"agent", "tool", "hook", "rule"}
+    components = {n: v for n, v in published.items() if n.split("_")[0] in kinds}
+    assert components == pytest.approx(
+        {
+            "agent_main_cost_usd": 0.1,
+            "agent_main_calls": 1,
+            "agent_main_llm_s": 5,
+            "agent_code-review_cost_usd": 0.4,
+            "agent_code-review_calls": 1,
+            "agent_code-review_llm_s": 10,
+            "tool_Read_calls": 1,
+            "tool_Bash_calls": 3,
+            "tool_Bash_failures": 1,
+            "tool_WebFetch_calls": 1,
+            "tool_WebFetch_long_waits": 1,
+            "tool_WebFetch_long_wait_s": 30,
+            "tool_Grep_calls": 1,
+            "hook_PreToolUse:Bash_runs": 2,
+            "hook_PreToolUse:Bash_total_ms": 100,
+            "hook_PreToolUse:Bash_blocking": 1,
+            "hook_SessionStart_runs": 1,
+            "hook_SessionStart_total_ms": 7,
+            "rule_bug-triage_reads": 1,
+        }
+    )
+    assert [s for s in scores if s["name"] not in components] == ev.build_scores(make_report())
+    assert all(s["dataType"] == "NUMERIC" for s in scores if s["name"] in components)
+    assert [s["id"] for s in scores] == [
+        s["id"] for s in ev.build_scores(make_report(attribution=attribution))
+    ]
+    assert len({s["id"] for s in scores}) == len(scores)
+
+
 class FakeHttp:
     def __init__(self, down=False):
         self.calls, self.down = [], down

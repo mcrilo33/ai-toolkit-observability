@@ -30,6 +30,16 @@ NOT_A_READ = (  # commands that carry free text, where a path is quoted rather t
     "gh pr edit",
     "orca orchestration",
 )
+# Most blocked_on_user spans are sub-second automatic permission checks; only a wait on the
+# user that lasts this long is signal worth a score.
+LONG_WAIT_S = 10
+# (score prefix, Attribution table, measures published): Langfuse dashboards group scores by
+# name and have no comment or metadata dimension, so each component is a score name.
+COMPONENT_SCORES = (
+    ("agent", "agents", ("cost_usd", "calls", "llm_s")),
+    ("tool", "tools", ("calls", "failures", "long_waits", "long_wait_s")),
+    ("hook", "hooks", ("runs", "total_ms", "blocking")),
+)
 
 
 def percentile(values: list[float], q: int) -> float:
@@ -50,7 +60,9 @@ class Attribution:
         )
     )
     tools: dict[tuple[str, str], dict] = field(
-        default_factory=lambda: defaultdict(lambda: dict(calls=0, failures=0, durations=[]))
+        default_factory=lambda: defaultdict(
+            lambda: dict(calls=0, failures=0, durations=[], long_waits=0, long_wait_s=0.0)
+        )
     )
     hooks: dict[tuple[str, str], dict] = field(
         default_factory=lambda: defaultdict(lambda: dict(runs=0, total_ms=0.0, blocking=0))
@@ -86,6 +98,9 @@ def attribute(leaves: list[Leaf], raw_records: list[dict], stepper: Stepper) -> 
             tool["calls"] += 1
             tool["failures"] += leaf.failed
             tool["durations"].append(leaf.end - leaf.start - leaf.blocked_s)
+            if leaf.blocked_s >= LONG_WAIT_S:
+                tool["long_waits"] += 1
+                tool["long_wait_s"] += leaf.blocked_s
             if leaf.name == "Read" and (m := ON_DEMAND_RULE.search(leaf.file_path)):
                 out.rules[m[1]] += 1
             elif leaf.name == "Bash":
@@ -158,6 +173,22 @@ def _score(rep: SessionReport, name: str, value, data_type: str) -> dict:
     return score | {"environment": rep.environment} if rep.environment else score
 
 
+def _component_measures(attribution: Attribution) -> dict[str, float]:
+    """Sum each component's measures over the steps, keeping only the non-zero ones.
+
+    A component that did not run, or never failed or waited, publishes nothing: a dashboard
+    sums a missing point as zero, and the per-session score count stays bounded by what ran.
+    """
+    totals: Counter = Counter()
+    for prefix, table, measures in COMPONENT_SCORES:
+        for (_step, name), stats in getattr(attribution, table).items():
+            for measure in measures:
+                totals[f"{prefix}_{name}_{measure}"] += stats[measure]
+    for name, reads in attribution.rules.items():
+        totals[f"rule_{name}_reads"] += reads
+    return {name: value for name, value in totals.items() if value}
+
+
 def build_scores(rep: SessionReport) -> list[dict]:
     """Build a session's Langfuse scores; ids are deterministic, so a re-run upserts."""
     acct = rep.accounting
@@ -172,6 +203,7 @@ def build_scores(rep: SessionReport) -> list[dict]:
     for step, slot in acct.steps.items():
         numeric[f"step_{step}_cost_usd"] = slot.cost_usd
         numeric[f"step_{step}_active_s"] = slot.active_s
+    numeric |= _component_measures(rep.attribution)
     scores = [_score(rep, n, round(float(v), 6), "NUMERIC") for n, v in numeric.items()]
     scores.append(_score(rep, "landed", int(rep.landed), "BOOLEAN"))
     scores.append(_score(rep, "gate_lane", rep.gate_lane or "unknown", "CATEGORICAL"))

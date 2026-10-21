@@ -491,8 +491,9 @@ def test_build_scores_publish_component_scores_summed_over_steps_without_zeros()
             "agent_code-review_cost_usd": 0.4,
             "agent_code-review_calls": 1,
             "agent_code-review_llm_s": 10,
+            "tool_Agent_calls": 1,
             "tool_Read_calls": 1,
-            "tool_Bash_calls": 3,
+            "tool_Bash_calls": 2,
             "tool_Bash_failures": 1,
             "tool_WebFetch_calls": 1,
             "tool_WebFetch_long_waits": 1,
@@ -705,6 +706,10 @@ def test_fetch_observations_follows_the_cursor():
     assert "fromStartTime" not in seen[0]
 
 
+# The World session: 16 session-level scores plus its component scores (12 with the raw hooks).
+WORLD_SCORES, WORLD_SCORES_NO_RAW = 28, 26
+
+
 class World:
     """Canned Langfuse, gh, git and Keychain answers for `main`."""
 
@@ -804,7 +809,7 @@ def test_main_reports_one_session_and_a_rerun_posts_the_same_score_ids(tmp_path,
     assert "gap-filled from the raw JSONL" in out and "1 LLM request" in out
     assert "raw JSONL covers only" in out and "lower bound" in out
     assert "PreToolUse:Bash" in out and "bug-triage" in out and "Zero-use rules: workflow" in out
-    assert len(first) == 16 and world.posted_ids() == sorted(first * 2)
+    assert len(first) == WORLD_SCORES and world.posted_ids() == sorted(first * 2)
     assert {c[2]["environment"] for c in world.http_calls if c[0] == "POST"} == {
         "ai-toolkit-observability"
     }
@@ -833,7 +838,7 @@ def test_main_keeps_trace_numbers_when_the_raw_jsonl_rotated_away(tmp_path, caps
     assert any("raw JSONL" in n for n in report["sessions"][0]["notes"])
     assert any("lower bound" in n for n in report["sessions"][0]["notes"])
     assert report["sessions"][0]["cost_usd"] == pytest.approx(0.75)
-    assert len(world.posted_ids()) == 16
+    assert len(world.posted_ids()) == WORLD_SCORES_NO_RAW
 
 
 def test_main_with_the_stack_down_fails_clearly_and_posts_nothing(tmp_path, capsys):
@@ -879,7 +884,7 @@ def test_main_window_selects_sessions_and_never_clips_their_spans(tmp_path, wind
 
     assert world.main(*window) == 0
 
-    assert len(world.posted_ids()) == (16 if scored else 0)
+    assert len(world.posted_ids()) == (WORLD_SCORES if scored else 0)
     assert not any("fromStartTime" in c[1] or "toStartTime" in c[1] for c in world.http_calls)
 
 
@@ -896,7 +901,7 @@ def test_main_rejects_a_window_it_cannot_parse(tmp_path, capsys):
     "extra,posted",
     [
         pytest.param([], 0, id="other-repo-skipped"),
-        pytest.param(["--session", SPOKE, "--issue", "1"], 16, id="forced-session-bypasses-repo"),
+        pytest.param(["--session", SPOKE, "--issue", "1"], WORLD_SCORES, id="forced-session-bypasses-repo"),
     ],
 )
 def test_main_repo_filter_yields_to_an_explicit_session(tmp_path, extra, posted):
@@ -962,7 +967,7 @@ def test_main_routes_each_session_to_the_gh_and_git_of_its_own_repo(tmp_path, ca
     assert world.main("--repo", f"ai-toolkit=owner/ai-toolkit={checkout}") == 0
 
     out = capsys.readouterr().out
-    assert len(world.posted_ids()) == 32  # two sessions of issue #1 in two repos do not collide
+    assert len(world.posted_ids()) == 48  # two sessions of issue #1 in two repos do not collide
     assert "feat: toolkit work" in out and "feat: x" in out
     views = [a[a.index("-R") + 1] for a in world.run_calls if a[:3] == ["gh", "issue", "view"]]
     assert sorted(views) == ["owner/ai-toolkit", CWD_SLUG]

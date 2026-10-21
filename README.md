@@ -90,6 +90,15 @@ Per session the scores are `cost_usd_total`, `duration_active_s`, `waiting_s`, `
 per-tool, per-hook and per-rule tables, the zero-use on-demand rules, and a static
 token-size table of the always-on rules (cost only, usefulness is not measurable here).
 
+Components are scores too, summed over the steps, one score name per component because a
+Langfuse dashboard widget groups scores by name and has no comment or metadata dimension:
+`agent_<name>_{cost_usd,calls,llm_s}` (`main` included),
+`tool_<name>_{calls,failures,long_waits,long_wait_s}`, `hook_<name>_{runs,total_ms,blocking}`
+and `rule_<name>_reads`. Only non-zero values are published, so a component that did not
+run, fail or block adds no score. A long wait is a tool call blocked on the user for 10 s or
+more; shorter waits are automatic permission checks. The always-on rule sizes are not scored:
+they are read from the current checkout, so a re-run would rewrite history with today's sizes.
+
 ### Which source answers which metric
 
 | Metric | Source | Notes |

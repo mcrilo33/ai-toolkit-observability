@@ -148,6 +148,7 @@ def test_parse_lifecycle_records_each_review_rejection_with_its_two_flags():
         comment(300, "round 3 (attended, decided by the user): tdd_followed is false: x"),
         comment(400, "blocked: review still rejects after 2 rounds"),
         comment(500, "Free text: tests_weakened: the diff weakens or skips tests"),
+        comment(600, REJECTION.format(n=3, blockers="(1) a quote of tests_weakened: in prose")),
     ]
 
     life = ev.parse_lifecycle(comments)
@@ -155,20 +156,8 @@ def test_parse_lifecycle_records_each_review_rejection_with_its_two_flags():
     assert [(r.at - T0, r.tdd_failed, r.tests_weakened) for r in life.reviews] == [
         (100, True, True),
         (200, False, False),
+        (600, False, False),
     ]
-
-
-def test_judged_review_is_the_first_rejection_after_the_sessions_last_span():
-    life = ev.parse_lifecycle(
-        [
-            comment(100, REJECTION.format(n=1, blockers=WEAKENED_BLOCKER)),
-            comment(900, REJECTION.format(n=2, blockers=TDD_BLOCKER)),
-        ]
-    )
-
-    assert ev.judged_review(life, T0 + 50).tests_weakened is True
-    assert ev.judged_review(life, T0 + 500).tdd_failed is True
-    assert ev.judged_review(life, T0 + 950) is None
 
 
 def build_account(leaves, comments, commits=()):
@@ -508,22 +497,24 @@ def test_build_scores_publish_the_review_flags_only_when_a_rejection_judged_the_
     assert [s["id"] for s in scores] == [s["id"] for s in ev.build_scores(rep)]
 
 
-def test_analyse_session_gives_each_worker_session_the_rejection_that_judged_it():
+def test_analyse_session_takes_the_rejections_posted_during_its_spans_and_the_one_after():
     comments = [
         comment(100, REJECTION.format(n=1, blockers=WEAKENED_BLOCKER)),
         comment(900, REJECTION.format(n=2, blockers="(1) a naming nit")),
+        comment(1200, REJECTION.format(n=3, blockers=TDD_BLOCKER)),
     ]
     issue = {"number": 1, "title": "t", "body": "Gate: plan", "labels": [], "comments": comments}
 
-    def analyse(start, end):
-        obs = [make_obs("tool:Bash", start, end)]
-        return ev.analyse_session(SPOKE, "ai-toolkit-observability", obs, [], issue, [], None)
+    def verdict(*spans):
+        obs = [make_obs("tool:Bash", start, end) for start, end in spans]
+        rep = ev.analyse_session(SPOKE, "ai-toolkit-observability", obs, [], issue, [], None)
+        return rep.review_tdd_followed, rep.review_tests_weakened
 
-    first, second, last = analyse(0, 60), analyse(200, 800), analyse(1000, 1100)
-
-    assert (first.review_tdd_followed, first.review_tests_weakened) == (True, True)
-    assert (second.review_tdd_followed, second.review_tests_weakened) == (True, False)
-    assert (last.review_tdd_followed, last.review_tests_weakened) == (None, None)
+    assert verdict((0, 60)) == (True, True)  # only the first rejection
+    assert verdict((200, 300), (500, 800)) == (True, False)  # only the second
+    assert verdict((0, 60), (200, 800)) == (True, True)  # a re-dispatch: rounds 1 and 2
+    assert verdict((1000, 1100)) == (False, False)
+    assert verdict((1300, 1400)) == (None, None)
 
 
 def test_build_scores_publish_component_scores_summed_over_steps_without_zeros():

@@ -33,6 +33,18 @@ NOT_A_READ = (  # commands that carry free text, where a path is quoted rather t
 # Most blocked_on_user spans are sub-second automatic permission checks; only a wait on the
 # user that lasts this long is signal worth a score.
 LONG_WAIT_S = 10
+# A fixed group list keeps the score count bounded; a raw program name would not.
+BASH_GROUPS = {
+    **dict.fromkeys(("grep", "rg", "sed", "cat", "ls", "wc", "head", "tail", "find", "awk"), "read"),
+    **dict.fromkeys(("pytest", "shellcheck"), "test"),
+    **dict.fromkeys(("python", "python3"), "python"),
+    "git": "git",
+    "gh": "gh",
+    "orca": "orca",
+}
+# What a command may start with before its real program: `cd <dir> &&`, `VAR=value`, wrappers.
+BASH_PREFIX = re.compile(r"\s*(?:cd\s+\S+\s*(?:&&|;)|\w+=\S*|timeout\s+\d+\S*|env(?=\s))\s*")
+BASH_PROGRAM = re.compile(r"[^\s|;&<>()]+")
 # (score prefix, Attribution table, measures published): Langfuse dashboards group scores by
 # name and have no comment or metadata dimension, so each component is a score name.
 COMPONENT_SCORES = (
@@ -81,6 +93,18 @@ def _rules_read_by_bash(command: str) -> set[str]:
     return names
 
 
+def bash_group(command: str) -> str:
+    """Return the group of a Bash command's first real program (`other` when unknown)."""
+    while prefix := BASH_PREFIX.match(command):
+        command = command[prefix.end() :]
+    program = BASH_PROGRAM.match(command)
+    if not program:
+        return "other"
+    if ".ai-toolkit/scripts/" in program[0]:
+        return "toolkit"
+    return BASH_GROUPS.get(program[0].rsplit("/", 1)[-1], "other")
+
+
 def attribute(leaves: list[Leaf], raw_records: list[dict], stepper: Stepper) -> Attribution:
     """Attribute leaves and raw hook records to the step they started in."""
     out = Attribution()
@@ -94,7 +118,8 @@ def attribute(leaves: list[Leaf], raw_records: list[dict], stepper: Stepper) -> 
             agent["llm_s"] += leaf.end - leaf.start
         elif leaf.kind == "tool":
             agent["tool_calls"] += 1
-            tool = out.tools[(step, leaf.name)]
+            name = f"bash-{bash_group(leaf.command)}" if leaf.name == "Bash" else leaf.name
+            tool = out.tools[(step, name)]
             tool["calls"] += 1
             tool["failures"] += leaf.failed
             tool["durations"].append(leaf.end - leaf.start - leaf.blocked_s)

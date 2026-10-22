@@ -96,13 +96,19 @@ Components are scores too, summed over the steps, one score name per component b
 Langfuse dashboard widget groups scores by name and has no comment or metadata dimension:
 `agent_<name>_{cost_usd,calls,llm_s}` (`main` included),
 `tool_<name>_{calls,failures,long_waits,long_wait_s}`, `hook_<name>_{runs,total_ms,blocking}`
-and `rule_<name>_reads`. Only non-zero values are published, so a component that did not
+and `rule_<name>_reads`. Bash is split by the first program of the command (after a leading
+`cd <dir> &&`, `VAR=value`, `timeout <n>` or `env`) into `tool_bash-<group>_*`, where the group
+is one of `read` (grep, sed, cat, ls, ...), `git`, `gh`, `orca`, `test` (pytest, shellcheck),
+`python`, `toolkit` (a program under `.ai-toolkit/scripts/`) or `other`; `tool_Bash_*` is no
+longer sent. Only non-zero values are published, so a component that did not
 run, fail or block adds no score. A long wait is a tool call blocked on the user for 10 s or
 more; shorter waits are automatic permission checks. A session publishes at most
-3 x agents + 4 x tools + 3 x hook names + rules scores on top of its 18 (106 in total at most
-on the sessions scored so far, one POST each); a hook name is its event and matcher, so each MCP
+3 x agents + 4 x tools + 3 x hook names + rules scores on top of its 18, where Bash adds up to
+8 groups x 4 scores instead of 4 (134 in total at most on the sessions scored so far, one POST
+each); a hook name is its event and matcher, so each MCP
 tool adds hook scores. A re-run overwrites a published score but never clears one that has since
-become zero. The always-on rule sizes are not scored:
+become zero, so sessions scored before the Bash split keep their `tool_Bash_*` scores. The
+always-on rule sizes are not scored:
 they are read from the current checkout, so a re-run would rewrite history with today's sizes.
 
 ### Which source answers which metric

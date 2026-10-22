@@ -489,8 +489,8 @@ def test_build_scores_carry_the_environment_only_when_the_session_has_one():
 @pytest.mark.parametrize(
     "tdd_followed,tests_weakened,expected",
     [
-        pytest.param(False, True, {"review_tdd_followed": 0, "review_tests_weakened": 1}, id="both"),
-        pytest.param(True, False, {"review_tdd_followed": 1, "review_tests_weakened": 0}, id="none"),
+        pytest.param(False, True, {"review_tdd_followed": 0, "review_tests_weakened": 1}, id="hit"),
+        pytest.param(True, False, {"review_tdd_followed": 1, "review_tests_weakened": 0}, id="ok"),
         pytest.param(None, None, {}, id="no-verdict"),
     ],
 )

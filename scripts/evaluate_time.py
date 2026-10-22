@@ -261,6 +261,8 @@ class Lifecycle:
 
 
 REJECTION = re.compile(r"round \d+: address: the independent review requested changes")
+TDD_BLOCKER = re.compile(r"\(\d+\) tdd_followed is false:")
+WEAKENED_BLOCKER = re.compile(r"\(\d+\) tests_weakened:")
 
 
 def _tool_of(body: str) -> str:
@@ -304,9 +306,9 @@ def parse_lifecycle(comments: list[dict]) -> Lifecycle:
         elif body.startswith("A gate question needs a human"):
             gate_open = at if gate_open is None else gate_open  # a re-ask keeps the first time
         elif REJECTION.match(body):
-            # review.sh's fixed blocker strings, never free text
+            # review.sh's numbered blocker lines, never free text
             life.reviews.append(
-                Review(at, "tdd_followed is false:" in body, "tests_weakened:" in body)
+                Review(at, bool(TDD_BLOCKER.search(body)), bool(WEAKENED_BLOCKER.search(body)))
             )
         elif body.startswith("blocked:"):
             life.blocked_count += 1
@@ -319,9 +321,19 @@ def parse_lifecycle(comments: list[dict]) -> Lifecycle:
     return life
 
 
-def judged_review(life: Lifecycle, after: float) -> Review | None:
-    """Return the first review rejection posted after `after`, the end of a session's last span."""
-    return next((r for r in life.reviews if r.at > after), None)
+def judged_reviews(life: Lifecycle, start: float, end: float) -> list[Review]:
+    """Return the rejections that judged a session spanning `start` to `end`.
+
+    A re-dispatch continues the same session, so every rejection posted during its spans
+    counts, plus the first one after them (the review of its last push).
+    """
+    judged = []
+    for review in life.reviews:
+        if review.at > start:
+            judged.append(review)
+            if review.at > end:
+                break
+    return judged
 
 
 def is_landed(life: Lifecycle, run) -> bool:

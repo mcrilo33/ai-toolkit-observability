@@ -88,9 +88,9 @@ Per session the scores are `cost_usd_total`, `duration_active_s`, `waiting_s`, `
 `step_<plan|implement|review|ship>_{cost_usd,active_s}`, `review_rounds`, `redispatches`,
 `landed` (boolean), `review_tdd_followed` and `review_tests_weakened` (booleans, only when a
 coordinator rejection judged the session, see the source table) and `gate_lane` (categorical).
-The report adds per-step, per-agent,
-per-tool, per-hook and per-rule tables, the zero-use on-demand rules, and a static
-token-size table of the always-on rules (cost only, usefulness is not measurable here).
+The report adds per-step, per-agent, per-tool, per-hook and per-rule tables, the zero-use on-demand
+rules, and a static token-size table of the always-on rules (cost only, usefulness is not
+measurable here).
 
 Components are scores too, summed over the steps, one score name per component because a
 Langfuse dashboard widget groups scores by name and has no comment or metadata dimension:
@@ -117,7 +117,7 @@ they are read from the current checkout, so a re-run would rewrite history with 
 | `gate_lane`, labels | `gh issue view`: the `Gate:` footer | |
 | Gate answer, permission/gate waits, `blocked:`, `landed in` | `gh` issue comments written by the coordinator loop | Timestamps drive the segmentation |
 | `landed` | The `landed in <sha>` comment, checked with `git merge-base --is-ancestor` | An unknown SHA leaves the comment as evidence |
-| `review_tdd_followed`, `review_tests_weakened` | The coordinator's `round N: address: the independent review requested changes` comment: its fixed `tdd_followed is false:` and `tests_weakened:` blocker strings, read for the first such comment posted after the session's last span | Published only for a session a rejection judged. An approval leaves no verdict trace, the final `blocked: review still rejects` comment carries no blockers and attended rounds carry none, so those sessions publish neither score; the `landed` score is the denominator, a proxy that a manual `land.sh` without `--review` makes look lower than the true rate |
+| `review_tdd_followed`, `review_tests_weakened` | The coordinator's `round N: address: the independent review requested changes` comment: its fixed `tdd_followed is false:` and `tests_weakened:` numbered blocker lines. A session takes every such comment posted during its spans (a re-dispatch keeps the spoke's session) plus the first one after them; a flag is set if any holds it | Published only for a session a rejection judged. An approval leaves no verdict trace, the final `blocked: review still rejects` comment carries no blockers and attended rounds carry none, so those sessions publish neither score; the `landed` score is the denominator, a proxy that a manual `land.sh` without `--review` makes look lower than the true rate |
 | `review_rounds` | `sub-agent:code-review` spans, or raw `Agent` tool results with `subagent_type` `code-review`; the larger count | Comments and commits carry no review marker; a lower bound when telemetry is incomplete |
 | `redispatches` | Distinct Claude `session.id` in Langfuse and the raw JSONL, minus one, or the `blocked:` comment count if larger | A lower bound when telemetry is incomplete |
 | On-demand rule loads | `Read` of `.ai-toolkit/rules/<name>.md`, or a Bash `cat`/`sed`/`head`/`grep` of it | Workers use Bash, so both count |

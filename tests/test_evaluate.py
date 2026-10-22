@@ -412,6 +412,7 @@ def test_attribute_counts_agents_tools_hooks_and_rules_per_step():
         ("/w/.ai-toolkit/scripts/foo.sh --x", "toolkit"),
         ("orca orchestration send --type worker_done", "orca"),
         ("python3 scripts/x.py", "python"),
+        ("\ngit status", "git"),
         ("frobnicate --now", "other"),
         ("", "other"),
     ],
@@ -799,7 +800,7 @@ def test_fetch_observations_follows_the_cursor():
     assert "fromStartTime" not in seen[0]
 
 
-# The World session: 16 session-level scores plus its component scores (12 with the raw hooks).
+# The World session: 16 session-level scores plus its component scores (14 with the raw hooks).
 WORLD_SCORES, WORLD_SCORES_NO_RAW = 30, 28
 
 

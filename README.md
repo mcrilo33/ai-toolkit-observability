@@ -98,7 +98,7 @@ Langfuse dashboard widget groups scores by name and has no comment or metadata d
 `tool_<name>_{calls,failures,long_waits,long_wait_s}`, `hook_<name>_{runs,total_ms,blocking}`
 and `rule_<name>_reads`. Bash is split by the first program of the command (after a leading
 `cd <dir> &&`, `VAR=value`, `timeout <n>` or `env`) into `tool_bash-<group>_*`, where the group
-is one of `read` (grep, sed, cat, ls, ...), `git`, `gh`, `orca`, `test` (pytest, shellcheck),
+is one of `read` (grep, sed, cat, ls, ...), `git`, `gh`, `orca`, `test` (a bare `pytest` or `shellcheck`; `python -m pytest` counts as `python`),
 `python`, `toolkit` (a program under `.ai-toolkit/scripts/`) or `other`; `tool_Bash_*` is no
 longer sent. Only non-zero values are published, so a component that did not
 run, fail or block adds no score. A long wait is a tool call blocked on the user for 10 s or

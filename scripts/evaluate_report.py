@@ -95,6 +95,7 @@ def _rules_read_by_bash(command: str) -> set[str]:
 
 def bash_group(command: str) -> str:
     """Return the group of a Bash command's first real program (`other` when unknown)."""
+    command = command.lstrip()
     while prefix := BASH_PREFIX.match(command):
         command = command[prefix.end() :]
     program = BASH_PROGRAM.match(command)

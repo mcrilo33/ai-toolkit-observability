@@ -7,6 +7,7 @@ from pathlib import Path
 
 import evaluate as ev
 import pytest
+from evaluate_report import bash_group
 
 T0 = dt.datetime(2026, 10, 6, 14, 52, tzinfo=dt.UTC).timestamp()
 SPOKE = "8065ac0d-8af2-42c4-b495-c661f02002ec"
@@ -391,11 +392,32 @@ def test_attribute_counts_agents_tools_hooks_and_rules_per_step():
 
     assert stats.agents[("review", "code-review")]["cost_usd"] == pytest.approx(0.4)
     assert stats.agents[("plan", "main")]["calls"] == 1
-    bash = stats.tools[("plan", "Bash")]
-    assert (bash["calls"], bash["failures"]) == (11, 1)
-    assert ev.percentile(bash["durations"], 90) == 4
+    assert ("plan", "Bash") not in stats.tools
+    bash = [v for (step, name), v in stats.tools.items() if name.startswith("bash-")]
+    assert (sum(v["calls"] for v in bash), sum(v["failures"] for v in bash)) == (11, 1)
+    assert stats.tools[("plan", "bash-read")]["calls"] == 3
+    other = stats.tools[("plan", "bash-other")]
+    assert ev.percentile(other["durations"], 90) == 10
     assert stats.hooks[("plan", "PreToolUse:Bash")] == {"runs": 2, "total_ms": 100.0, "blocking": 1}
     assert dict(stats.rules) == {"bug-triage": 1, "workflow": 1, "a": 1, "b": 1}
+
+
+@pytest.mark.parametrize(
+    "command,group",
+    [
+        ("cd x && git status", "git"),
+        ("FOO=1 timeout 60 pytest -q", "test"),
+        ("cd /w; BAR=2 env gh pr view 3", "gh"),
+        ("grep a f | wc -l", "read"),
+        ("/w/.ai-toolkit/scripts/foo.sh --x", "toolkit"),
+        ("orca orchestration send --type worker_done", "orca"),
+        ("python3 scripts/x.py", "python"),
+        ("frobnicate --now", "other"),
+        ("", "other"),
+    ],
+)
+def test_bash_group_classifies_a_command_by_its_first_real_program(command, group):
+    assert bash_group(command) == group
 
 
 def test_measure_rule_sizes_marks_path_scoped_rules(tmp_path):
@@ -564,8 +586,8 @@ def test_build_scores_publish_component_scores_summed_over_steps_without_zeros()
             "agent_code-review_llm_s": 10,
             "tool_Agent_calls": 1,
             "tool_Read_calls": 1,
-            "tool_Bash_calls": 2,
-            "tool_Bash_failures": 1,
+            "tool_bash-other_calls": 2,
+            "tool_bash-other_failures": 1,
             "tool_WebFetch_calls": 1,
             "tool_WebFetch_long_waits": 1,
             "tool_WebFetch_long_wait_s": 30,

@@ -242,12 +242,25 @@ class Wait:
     answered: bool
 
 
+@dataclass(slots=True, frozen=True)
+class Review:
+    """A coordinator review rejection: when it was posted and which flags its blockers hold."""
+
+    at: float
+    tdd_failed: bool
+    tests_weakened: bool
+
+
 @dataclass(slots=True)
 class Lifecycle:
     gate_answered_at: float | None = None
     waits: list[Wait] = field(default_factory=list)
+    reviews: list[Review] = field(default_factory=list)
     blocked_count: int = 0
     landed_sha: str | None = None
+
+
+REJECTION = re.compile(r"round \d+: address: the independent review requested changes")
 
 
 def _tool_of(body: str) -> str:
@@ -290,6 +303,11 @@ def parse_lifecycle(comments: list[dict]) -> Lifecycle:
                 )
         elif body.startswith("A gate question needs a human"):
             gate_open = at if gate_open is None else gate_open  # a re-ask keeps the first time
+        elif REJECTION.match(body):
+            # review.sh's fixed blocker strings, never free text
+            life.reviews.append(
+                Review(at, "tdd_followed is false:" in body, "tests_weakened:" in body)
+            )
         elif body.startswith("blocked:"):
             life.blocked_count += 1
             close_gate(at, False)
@@ -299,6 +317,11 @@ def parse_lifecycle(comments: list[dict]) -> Lifecycle:
     if gate_open is not None:
         life.waits.append(Wait(gate_open, INF, "gate", False))
     return life
+
+
+def judged_review(life: Lifecycle, after: float) -> Review | None:
+    """Return the first review rejection posted after `after`, the end of a session's last span."""
+    return next((r for r in life.reviews if r.at > after), None)
 
 
 def is_landed(life: Lifecycle, run) -> bool:

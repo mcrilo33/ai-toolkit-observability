@@ -55,6 +55,7 @@ from evaluate_time import (
     count_dispatches,
     find_issue,
     is_landed,
+    judged_review,
     load_commits,
     parse_lifecycle,
     parse_time,
@@ -82,6 +83,7 @@ __all__ = [
     "fetch_observations",
     "find_issue",
     "is_landed",
+    "judged_review",
     "list_unused_rules",
     "load_raw",
     "main",
@@ -279,6 +281,7 @@ def analyse_session(session, repo, observations, raw, issue, commits, run) -> Se
         )
     if not issue:
         notes.append("issue unknown: pass --issue N --session ID; no scores are published")
+    verdict = judged_review(life, max(lf.end for lf in leaves)) if leaves else None
     named = any(o["metadata"].get("repo") == repo for o in observations)
     return SessionReport(
         session=session,
@@ -289,6 +292,8 @@ def analyse_session(session, repo, observations, raw, issue, commits, run) -> Se
         gate_lane=footer[1] if footer else None,
         labels=[lb["name"] for lb in issue["labels"]] if issue else [],
         landed=is_landed(life, run),
+        review_tdd_followed=None if verdict is None else not verdict.tdd_failed,
+        review_tests_weakened=None if verdict is None else verdict.tests_weakened,
         blocked_comments=life.blocked_count,
         **counts,
         accounting=account_time(leaves, life, commits),

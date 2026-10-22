@@ -150,6 +150,8 @@ class SessionReport:
     gate_lane: str | None = None
     labels: list[str] = field(default_factory=list)
     landed: bool = False
+    review_tdd_followed: bool | None = None  # None: no rejection comment judged this session
+    review_tests_weakened: bool | None = None
     review_rounds: int = 0
     redispatches: int = 0
     blocked_comments: int = 0
@@ -206,6 +208,9 @@ def build_scores(rep: SessionReport) -> list[dict]:
     numeric |= _component_measures(rep.attribution)
     scores = [_score(rep, n, round(float(v), 6), "NUMERIC") for n, v in numeric.items()]
     scores.append(_score(rep, "landed", int(rep.landed), "BOOLEAN"))
+    for name in ("review_tdd_followed", "review_tests_weakened"):
+        if (flag := getattr(rep, name)) is not None:
+            scores.append(_score(rep, name, int(flag), "BOOLEAN"))
     scores.append(_score(rep, "gate_lane", rep.gate_lane or "unknown", "CATEGORICAL"))
     return scores
 

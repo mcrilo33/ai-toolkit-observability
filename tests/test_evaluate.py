@@ -502,6 +502,9 @@ def test_analyse_session_takes_the_rejections_posted_during_its_spans_and_the_on
         comment(100, REJECTION.format(n=1, blockers=WEAKENED_BLOCKER)),
         comment(900, REJECTION.format(n=2, blockers="(1) a naming nit")),
         comment(1200, REJECTION.format(n=3, blockers=TDD_BLOCKER)),
+        comment(1250, "blocked: review still rejects after 2 rounds"),
+        comment(1500, REJECTION.format(n=1, blockers=WEAKENED_BLOCKER)),
+        comment(2000, "landed in abc1234"),
     ]
     issue = {"number": 1, "title": "t", "body": "Gate: plan", "labels": [], "comments": comments}
 
@@ -514,7 +517,9 @@ def test_analyse_session_takes_the_rejections_posted_during_its_spans_and_the_on
     assert verdict((200, 300), (500, 800)) == (True, False)  # only the second
     assert verdict((0, 60), (200, 800)) == (True, True)  # a re-dispatch: rounds 1 and 2
     assert verdict((1000, 1100)) == (False, False)
-    assert verdict((1300, 1400)) == (None, None)
+    assert verdict((1210, 1240)) == (None, None)  # a blocked: verdict closes the window
+    assert verdict((1300, 1400)) == (True, True)
+    assert verdict((1600, 1700)) == (None, None)  # approved and landed
 
 
 def test_build_scores_publish_component_scores_summed_over_steps_without_zeros():

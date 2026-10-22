@@ -510,7 +510,7 @@ def test_analyse_session_takes_the_rejections_posted_during_its_spans_and_the_on
 
     def verdict(*spans):
         obs = [make_obs("tool:Bash", start, end) for start, end in spans]
-        rep = ev.analyse_session(SPOKE, "ai-toolkit-observability", obs, [], issue, [], None)
+        rep = ev.analyse_session(SPOKE, "ai-toolkit-observability", obs, [], issue, [], lambda *_: "")
         return rep.review_tdd_followed, rep.review_tests_weakened
 
     assert verdict((0, 60)) == (True, True)  # only the first rejection

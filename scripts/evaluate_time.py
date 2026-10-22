@@ -256,6 +256,7 @@ class Lifecycle:
     gate_answered_at: float | None = None
     waits: list[Wait] = field(default_factory=list)
     reviews: list[Review] = field(default_factory=list)
+    verdicts: list[float] = field(default_factory=list)  # blocked:, attended round, landed
     blocked_count: int = 0
     landed_sha: str | None = None
 
@@ -310,11 +311,15 @@ def parse_lifecycle(comments: list[dict]) -> Lifecycle:
             life.reviews.append(
                 Review(at, bool(TDD_BLOCKER.search(body)), bool(WEAKENED_BLOCKER.search(body)))
             )
+        elif body.startswith("round "):
+            life.verdicts.append(at)  # an attended round: decided by the user, no flags
         elif body.startswith("blocked:"):
             life.blocked_count += 1
+            life.verdicts.append(at)
             close_gate(at, False)
         elif m := re.match(r"landed in ([0-9a-f]{7,40})", body):
             life.landed_sha = m[1]
+            life.verdicts.append(at)
             close_gate(at, False)
     if gate_open is not None:
         life.waits.append(Wait(gate_open, INF, "gate", False))
@@ -325,15 +330,13 @@ def judged_reviews(life: Lifecycle, start: float, end: float) -> list[Review]:
     """Return the rejections that judged a session spanning `start` to `end`.
 
     A re-dispatch continues the same session, so every rejection posted during its spans
-    counts, plus the first one after them (the review of its last push).
+    counts, plus the first one after them (the review of its last push) unless another
+    verdict (blocked, attended round, landed) comes first: that one judged the session.
     """
-    judged = []
-    for review in life.reviews:
-        if review.at > start:
-            judged.append(review)
-            if review.at > end:
-                break
-    return judged
+    judged = [r for r in life.reviews if start < r.at <= end]
+    last = next((r for r in life.reviews if r.at > end), None)
+    closed_at = next((t for t in life.verdicts if t > end), INF)
+    return judged + [last] * (last is not None and last.at < closed_at)
 
 
 def is_landed(life: Lifecycle, run) -> bool:

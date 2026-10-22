@@ -136,6 +136,41 @@ def test_parse_lifecycle_reads_waits_gate_and_landing_from_comments():
     assert not any(w[1] == 300 or w[2] == 1200 for w in waits)
 
 
+REJECTION = "round {n}: address: the independent review requested changes. Blockers: {blockers}"
+TDD_BLOCKER = "(1) tdd_followed is false: add the failing test that proves the behavior change"
+WEAKENED_BLOCKER = "(2) tests_weakened: the diff weakens or skips tests"
+
+
+def test_parse_lifecycle_records_each_review_rejection_with_its_two_flags():
+    comments = [
+        comment(100, REJECTION.format(n=1, blockers=f"{TDD_BLOCKER} {WEAKENED_BLOCKER}")),
+        comment(200, REJECTION.format(n=2, blockers="(1) the diff drops a docstring")),
+        comment(300, "round 3 (attended, decided by the user): tdd_followed is false: x"),
+        comment(400, "blocked: review still rejects after 2 rounds"),
+        comment(500, "Free text: tests_weakened: the diff weakens or skips tests"),
+    ]
+
+    life = ev.parse_lifecycle(comments)
+
+    assert [(r.at - T0, r.tdd_failed, r.tests_weakened) for r in life.reviews] == [
+        (100, True, True),
+        (200, False, False),
+    ]
+
+
+def test_judged_review_is_the_first_rejection_after_the_sessions_last_span():
+    life = ev.parse_lifecycle(
+        [
+            comment(100, REJECTION.format(n=1, blockers=WEAKENED_BLOCKER)),
+            comment(900, REJECTION.format(n=2, blockers=TDD_BLOCKER)),
+        ]
+    )
+
+    assert ev.judged_review(life, T0 + 50).tests_weakened is True
+    assert ev.judged_review(life, T0 + 500).tdd_failed is True
+    assert ev.judged_review(life, T0 + 950) is None
+
+
 def build_account(leaves, comments, commits=()):
     life = ev.parse_lifecycle(comments)
     return ev.account_time(leaves, life, list(commits))
@@ -449,6 +484,46 @@ def test_build_scores_carry_the_environment_only_when_the_session_has_one():
     assert {s["environment"] for s in tagged} == {"ai-toolkit"}
     assert not any("environment" in s for s in untagged)
     assert [s["id"] for s in tagged] == [s["id"] for s in untagged]
+
+
+@pytest.mark.parametrize(
+    "tdd_followed,tests_weakened,expected",
+    [
+        pytest.param(False, True, {"review_tdd_followed": 0, "review_tests_weakened": 1}, id="both"),
+        pytest.param(True, False, {"review_tdd_followed": 1, "review_tests_weakened": 0}, id="none"),
+        pytest.param(None, None, {}, id="no-verdict"),
+    ],
+)
+def test_build_scores_publish_the_review_flags_only_when_a_rejection_judged_the_session(
+    tdd_followed, tests_weakened, expected
+):
+    rep = make_report(
+        review_tdd_followed=tdd_followed, review_tests_weakened=tests_weakened, environment="repo"
+    )
+    scores = ev.build_scores(rep)
+    flags = {s["name"]: s for s in scores if s["name"].startswith("review_t")}
+
+    assert {n: s["value"] for n, s in flags.items()} == expected
+    assert all(s["dataType"] == "BOOLEAN" and s["environment"] == "repo" for s in flags.values())
+    assert [s["id"] for s in scores] == [s["id"] for s in ev.build_scores(rep)]
+
+
+def test_analyse_session_gives_each_worker_session_the_rejection_that_judged_it():
+    comments = [
+        comment(100, REJECTION.format(n=1, blockers=WEAKENED_BLOCKER)),
+        comment(900, REJECTION.format(n=2, blockers="(1) a naming nit")),
+    ]
+    issue = {"number": 1, "title": "t", "body": "Gate: plan", "labels": [], "comments": comments}
+
+    def analyse(start, end):
+        obs = [make_obs("tool:Bash", start, end)]
+        return ev.analyse_session(SPOKE, "ai-toolkit-observability", obs, [], issue, [], None)
+
+    first, second, last = analyse(0, 60), analyse(200, 800), analyse(1000, 1100)
+
+    assert (first.review_tdd_followed, first.review_tests_weakened) == (True, True)
+    assert (second.review_tdd_followed, second.review_tests_weakened) == (True, False)
+    assert (last.review_tdd_followed, last.review_tests_weakened) == (None, None)
 
 
 def test_build_scores_publish_component_scores_summed_over_steps_without_zeros():

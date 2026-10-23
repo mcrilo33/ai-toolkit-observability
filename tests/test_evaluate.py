@@ -562,17 +562,22 @@ def test_build_scores_publish_component_scores_summed_over_steps_without_zeros()
         make_obs("claude_code.tool.blocked_on_user", 105, 135, parent=slow["id"]),
         quick,
         make_obs("claude_code.tool.blocked_on_user", 150, 150.5, parent=quick["id"]),
+        make_obs("tool:mcp__chrome__navigate", 200, 201),
+        make_obs("tool:mcp__chrome__tabs_close_mcp", 210, 211),
     ]
     raw = [
         hook_record(1, "PreToolUse:Bash", 40),
         hook_record(2, "PreToolUse:Bash", 60, blocking="1"),
         hook_record(3, "SessionStart", 7),
     ]
+    raw_only = [raw_tool_result(220, "toolu_mcp", "mcp_tool")]
     attribution = run_attribution(
-        ev.build_leaves(observations), raw, [comment(1000, "Gate answered")]
+        ev.build_leaves(observations, raw_only), raw, [comment(1000, "Gate answered")]
     )
 
-    scores = ev.build_scores(make_report(attribution=attribution))
+    scores = ev.build_scores(
+        make_report(attribution=attribution), on_demand_rules=["bug-triage", "workflow"]
+    )
 
     published = {s["name"]: s["value"] for s in scores}
     kinds = {"agent", "tool", "hook", "rule"}
@@ -593,18 +598,24 @@ def test_build_scores_publish_component_scores_summed_over_steps_without_zeros()
             "tool_WebFetch_long_waits": 1,
             "tool_WebFetch_long_wait_s": 30,
             "tool_Grep_calls": 1,
+            "tool_mcp-chrome_calls": 2,
+            "tool_mcp-unknown_calls": 1,
             "hook_PreToolUse:Bash_runs": 2,
             "hook_PreToolUse:Bash_total_ms": 100,
             "hook_PreToolUse:Bash_blocking": 1,
             "hook_SessionStart_runs": 1,
             "hook_SessionStart_total_ms": 7,
             "rule_bug-triage_reads": 1,
+            "rule_workflow_reads": 0,
         }
     )
     assert [s for s in scores if s["name"] not in components] == ev.build_scores(make_report())
     assert all(s["dataType"] == "NUMERIC" for s in scores if s["name"] in components)
     assert [s["id"] for s in scores] == [
-        s["id"] for s in ev.build_scores(make_report(attribution=attribution))
+        s["id"]
+        for s in ev.build_scores(
+            make_report(attribution=attribution), on_demand_rules=["bug-triage", "workflow"]
+        )
     ]
     assert len({s["id"] for s in scores}) == len(scores)
 

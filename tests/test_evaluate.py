@@ -576,7 +576,9 @@ def test_build_scores_publish_component_scores_summed_over_steps_without_zeros()
     )
 
     scores = ev.build_scores(
-        make_report(attribution=attribution), on_demand_rules=["bug-triage", "workflow"]
+        make_report(attribution=attribution),
+        on_demand_rules=["bug-triage", "workflow"],
+        toolkit_agents=["code-review", "debug"],
     )
 
     published = {s["name"]: s["value"] for s in scores}
@@ -603,21 +605,59 @@ def test_build_scores_publish_component_scores_summed_over_steps_without_zeros()
             "hook_PreToolUse:Bash_runs": 2,
             "hook_PreToolUse:Bash_total_ms": 100,
             "hook_PreToolUse:Bash_blocking": 1,
+            "hook_PreToolUse:Bash_avg_ms": 50,
             "hook_SessionStart_runs": 1,
             "hook_SessionStart_total_ms": 7,
+            "hook_SessionStart_avg_ms": 7,
+            "agent_debug_calls": 0,
             "rule_bug-triage_reads": 1,
             "rule_workflow_reads": 0,
         }
     )
+    assert not {"agent_debug_cost_usd", "agent_debug_llm_s"} & published.keys()
     assert [s for s in scores if s["name"] not in components] == ev.build_scores(make_report())
     assert all(s["dataType"] == "NUMERIC" for s in scores if s["name"] in components)
     assert [s["id"] for s in scores] == [
         s["id"]
         for s in ev.build_scores(
-            make_report(attribution=attribution), on_demand_rules=["bug-triage", "workflow"]
+            make_report(attribution=attribution),
+            on_demand_rules=["bug-triage", "workflow"],
+            toolkit_agents=["code-review", "debug"],
         )
     ]
     assert len({s["id"] for s in scores}) == len(scores)
+
+
+def test_build_scores_publishes_no_hook_avg_ms_for_a_hook_with_no_runs():
+    attribution = ev.Attribution()
+    attribution.hooks[("plan", "Stop")]  # created with runs=0 by the defaultdict
+    attribution.hooks[("plan", "SessionStart")].update(runs=2, total_ms=10.0)
+    attribution.hooks[("implement", "SessionStart")].update(runs=2, total_ms=20.0)
+
+    scores = ev.build_scores(make_report(attribution=attribution))
+
+    published = {s["name"]: s["value"] for s in scores}
+    assert published["hook_SessionStart_avg_ms"] == 7.5
+    assert not [n for n in published if n.startswith("hook_Stop_")]
+
+
+def test_build_scores_zeroes_calls_of_unused_toolkit_agents_only():
+    review = make_obs("sub-agent:code-review", 500, 500.01)
+    llm = make_obs("sub-agent:llm", 500, 510, type_="GENERATION", parent=review["id"], cost=0.4)
+    attribution = run_attribution(ev.build_leaves([review, llm], []), [])
+
+    scores = ev.build_scores(
+        make_report(attribution=attribution), toolkit_agents=["code-review", "debug", "planner"]
+    )
+
+    published = {s["name"]: s["value"] for s in scores}
+    assert published["agent_code-review_calls"] == 1
+    assert published["agent_debug_calls"] == published["agent_planner_calls"] == 0
+    assert [n for n in published if n.startswith(("agent_debug_", "agent_planner_"))] == [
+        "agent_debug_calls",
+        "agent_planner_calls",
+    ]
+    assert "agent_main_calls" not in published
 
 
 class FakeHttp:
@@ -811,8 +851,8 @@ def test_fetch_observations_follows_the_cursor():
     assert "fromStartTime" not in seen[0]
 
 
-# The World session: 16 session-level scores plus its component scores (15 with the raw hooks).
-WORLD_SCORES, WORLD_SCORES_NO_RAW = 31, 29
+# The World session: 16 session-level scores plus its component scores (17 with the raw hooks).
+WORLD_SCORES, WORLD_SCORES_NO_RAW = 33, 30
 
 
 class World:
@@ -848,13 +888,16 @@ class World:
         }
         self.issue_of = {CWD_SLUG: self.issue}
         self.http_calls, self.run_calls, self.down = [], [], down
-        self.raw_dir, self.rules_dir, self.always_dir = (
+        self.raw_dir, self.rules_dir, self.always_dir, self.agents_dir = (
             tmp_path / "raw",
             tmp_path / "rules",
             tmp_path / "always",
+            tmp_path / "agents",
         )
-        for d in (self.raw_dir, self.rules_dir, self.always_dir):
+        for d in (self.raw_dir, self.rules_dir, self.always_dir, self.agents_dir):
             d.mkdir()
+        (self.agents_dir / "code-review.md").write_text("x")
+        (self.agents_dir / "debug.md").write_text("x")
         (self.rules_dir / "bug-triage.md").write_text("x")
         (self.rules_dir / "workflow.md").write_text("x")
         (self.always_dir / "guidelines.md").write_text("g" * 400)
@@ -894,6 +937,8 @@ class World:
             str(self.rules_dir),
             "--always-on-dir",
             str(self.always_dir),
+            "--agents-dir",
+            str(self.agents_dir),
             *extra,
         ]
         return ev.main(argv, http=self.http, run=self.run)

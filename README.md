@@ -87,7 +87,7 @@ and a re-run upserts: a score's id is a hash of the session and its name, so no 
 Per session the scores are `cost_usd_total`, `duration_active_s`, `waiting_s`, `other_s`,
 `step_<plan|implement|review|ship>_{cost_usd,active_s}`, `review_rounds`, `redispatches`,
 `landed` (boolean), `review_tdd_followed` and `review_tests_weakened` (booleans, only when a
-coordinator rejection judged the session, see the source table) and `gate_lane` (categorical).
+a review verdict or coordinator rejection judged the session, see the source table) and `gate_lane` (categorical).
 The report adds per-step, per-agent, per-tool, per-hook and per-rule tables, the zero-use on-demand
 rules, and a static token-size table of the always-on rules (cost only, usefulness is not
 measurable here).
@@ -96,7 +96,9 @@ Components are scores too, summed over the steps, one score name per component b
 Langfuse dashboard widget groups scores by name and has no comment or metadata dimension:
 `agent_<name>_{cost_usd,calls,llm_s}` (`main` included),
 `tool_<name>_{calls,failures,long_waits,long_wait_s}`, `hook_<name>_{runs,total_ms,blocking,avg_ms}`
-and `rule_<name>_reads`. Bash is split by the first program of the command (after a leading
+`rule_<name>_reads` and the review's violation counts `rule_<name>_{blockers,warnings}`: how many times
+the reviews that judged the session named that rule as a blocker or a warning (a rule named twice
+counts twice), `none` being a finding no rule covers. Bash is split by the first program of the command (after a leading
 `cd <dir> &&`, `VAR=value`, `timeout <n>` or `env`) into `tool_bash-<group>_*`, where the group
 is one of `read` (grep, sed, cat, ls, ...), `git`, `gh`, `orca`, `test` (a bare `pytest` or `shellcheck`; `python -m pytest` counts as `python`),
 `python`, `toolkit` (a program under `.ai-toolkit/scripts/`) or `other`; `tool_Bash_*` is no
@@ -106,7 +108,7 @@ published as `tool_mcp-unknown_*`. `hook_<name>_avg_ms` is `total_ms / runs` for
 the mean time per run that a dashboard cannot compute from the other two, and is only sent when
 the hook ran. Only non-zero values are published, so a component that did
 not run, fail or block adds no score. The exceptions are `rule_<name>_reads` and
-`agent_<name>_calls`. Every on-demand
+`agent_<name>_calls`; the violation counts are non-zero only. Every on-demand
 rule in `--rules-dir` gets a score for every scored session, 0 when unread, so the "On-demand rule
 reads" widget lists the unused rules (a fixed cost of one score per rule, 6 today). Likewise every toolkit agent in `--agents-dir`
 (`.claude/agents`, 13 today) gets `agent_<name>_calls` for every scored session, 0 when the session
@@ -117,6 +119,7 @@ with care: `afk-answering`, `planning-hub` and `workflow` are mostly read by coo
 which send no telemetry, so for them 0 means "not tracked", not "unused". A long wait is a tool
 call blocked on the user for 10 s or more; shorter waits are automatic permission checks. A
 session publishes at most 3 x agents + 4 x tools + 4 x hook names + 1 x on-demand rules + 1 x toolkit agents
++ 2 x review rule names (up to 38 in the worst case, 2 x the 18 rules plus `none`; a handful in practice)
 scores on top of its 18, where Bash adds up to 8 groups x 4 scores instead of 4 and the MCP tools add 4
 scores per server instead of 4 per tool; a hook name is its event and matcher, so each MCP tool
 adds hook scores. A re-run overwrites a published score but never clears one that has since
@@ -138,7 +141,8 @@ they are read from the current checkout, so a re-run would rewrite history with 
 | `gate_lane`, labels | `gh issue view`: the `Gate:` footer | |
 | Gate answer, permission/gate waits, `blocked:`, `landed in` | `gh` issue comments written by the coordinator loop | Timestamps drive the segmentation |
 | `landed` | The `landed in <sha>` comment, checked with `git merge-base --is-ancestor` | An unknown SHA leaves the comment as evidence |
-| `review_tdd_followed`, `review_tests_weakened` | The coordinator's `round N: address: the independent review requested changes` comment: its fixed `tdd_followed is false:` and `tests_weakened:` numbered blocker lines. A session takes every such comment posted during its spans (a re-dispatch keeps the spoke's session) plus the first one after them, unless a `blocked:`, attended round or `landed in` comment comes first; a flag is set if any holds it | Published only for a session a rejection judged. An approval leaves no verdict trace, the final `blocked: review still rejects` comment carries no blockers and attended rounds carry none, so those sessions publish neither score; the `landed` score is the denominator, a proxy that a manual `land.sh` without `--review` makes look lower than the true rate |
+| `review_tdd_followed`, `review_tests_weakened` | The toolkit's `review-verdict: {...}` issue comment (`"v":1`), posted on every review since 2026-10-22, approvals included: `tdd_followed` and `tests_weakened` are its own fields. Older issues keep the coordinator's `round N: address: the independent review requested changes` comment: its fixed `tdd_followed is false:` and `tests_weakened:` numbered blocker lines. A rejection leaves both comments and counts once (the `round N` comment right after a verdict is skipped). A session takes every review posted during its spans (a re-dispatch keeps the spoke's session) plus the first one after them, unless a `blocked:`, attended round or `landed in` comment comes first; a flag is set if any holds it | Published only for a session a review judged. A manual `land.sh` without `--review` posts no verdict, so it publishes neither score; attended rounds and the final `blocked: review still rejects` comment carry no flags themselves, but the verdict before them does. For sessions before 2026-10-22 an approval leaves no trace, so `landed` is the denominator, a proxy that a manual `land.sh` makes look lower than the true rate. A malformed verdict (bad JSON, `v` other than 1, non-list rule names) is ignored |
+| `rule_<name>_blockers`, `rule_<name>_warnings` | The `blockers` and `warnings` rule names of the same `review-verdict` comments, one count per name listed (a name listed twice counts twice); names come from the reviewer's fixed rule inventory plus `none` | Old-style `round N` rejections name no rule, so sessions before 2026-10-22 publish none; only non-zero counts are sent |
 | `review_rounds` | `sub-agent:code-review` spans, or raw `Agent` tool results with `subagent_type` `code-review`; the larger count | Comments and commits carry no review marker; a lower bound when telemetry is incomplete |
 | `redispatches` | Distinct Claude `session.id` in Langfuse and the raw JSONL, minus one, or the `blocked:` comment count if larger | A lower bound when telemetry is incomplete |
 | On-demand rule loads | `Read` of `.ai-toolkit/rules/<name>.md`, or a Bash `cat`/`sed`/`head`/`grep` of it | Workers use Bash, so both count |

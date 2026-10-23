@@ -572,6 +572,7 @@ def test_build_scores_publish_rule_costs_for_the_rules_that_were_loaded_only():
         pytest.param("abc123-dirty", True, 0.002, id="committed-text-of-a-dirty-version"),
         pytest.param(None, True, 0.004, id="no-version-reads-the-current-file"),
         pytest.param("abc123-dirty", False, 0.004, id="git-show-fails"),
+        pytest.param("--output=x", True, 0.004, id="a-version-that-is-not-a-revision"),
     ],
 )
 def test_analyse_session_sizes_each_rule_at_the_sessions_toolkit_commit(
@@ -606,11 +607,11 @@ def test_analyse_session_sizes_each_rule_at_the_sessions_toolkit_commit(
     assert rep.rule_costs["guidelines"]["loaded_requests"] == 2
     assert rep.rule_costs["guidelines"]["cost_usd"] == pytest.approx(cost)
     assert "workflow" not in rep.rule_costs  # never read
-    if version and git_ok:
+    if not version or version.startswith("-"):
+        assert git_calls == []
+    elif git_ok:
         assert ["git", "show", "abc123:shared/rules/guidelines.md"] in git_calls
         assert ["git", "show", "abc123:shared/rules/on-demand/workflow.md"] in git_calls
-    elif not version:
-        assert git_calls == []
 
 
 def test_list_unused_rules_lists_rule_files_never_read(tmp_path):

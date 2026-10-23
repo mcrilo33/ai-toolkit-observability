@@ -9,6 +9,7 @@ from pathlib import Path
 import evaluate as ev
 import pytest
 from evaluate_report import bash_group
+from evaluate_time import Leaf
 
 T0 = dt.datetime(2026, 10, 6, 14, 52, tzinfo=dt.UTC).timestamp()
 SPOKE = "8065ac0d-8af2-42c4-b495-c661f02002ec"
@@ -349,6 +350,7 @@ def test_build_leaves_fills_spans_langfuse_never_received_from_raw_without_dupli
     seen_llm = make_obs(
         "claude_code.llm_request", 100, 110, type_="GENERATION", cost=0.5, request_id="req_seen"
     )
+    seen_llm |= {"inputUsage": 118368, "inputCost": 0.0240876}
     seen_tool = make_obs("tool:Bash", 120, 121, tool_use_id="toolu_seen")
     rule = '{"file_path":"/w/.ai-toolkit/rules/workflow.md"}'
     raw = [
@@ -364,6 +366,9 @@ def test_build_leaves_fills_spans_langfuse_never_received_from_raw_without_dupli
     assert set(filled) == {"claude_code.llm_request", "Read"} and len(leaves) == 4
     llm = filled["claude_code.llm_request"]
     assert (llm.cost, llm.start, llm.end) == (0.25, T0 + 17, T0 + 20)
+    assert (llm.input_tokens, llm.input_cost) == (100, 0.0)  # raw has no input cost
+    (langfuse_llm,) = [lf for lf in leaves if lf.kind == "llm" and lf.source == "langfuse"]
+    assert (langfuse_llm.input_tokens, langfuse_llm.input_cost) == (118368, 0.0240876)
     assert filled["Read"].file_path.endswith("rules/workflow.md")
 
 
@@ -455,8 +460,157 @@ def test_measure_rule_sizes_marks_path_scoped_rules(tmp_path):
 
     sizes = {r.name: r for r in ev.measure_rule_sizes(tmp_path)}
 
-    assert (sizes["a"].tokens, sizes["a"].scoped) == (100, False)
-    assert sizes["b"].scoped is True
+    assert (sizes["a"].tokens, sizes["a"].scoped, sizes["a"].globs) == (100, False, ())
+    assert (sizes["b"].scoped, sizes["b"].globs) == (True, ("**/*.py",))
+    (tmp_path / "c.md").write_text(
+        "---\ndescription: x\npaths:\n  - 'bin/*'\n  - \"a/**/*.{py,sh}\"\n---\nz"
+    )
+    assert ev.measure_rule_sizes(tmp_path, lambda _path: "w" * 40)[0].tokens == 10
+    assert {r.name: r for r in ev.measure_rule_sizes(tmp_path)}["c"].globs == (
+        "bin/*",
+        "a/**/*.{py,sh}",
+    )
+
+
+def llm_leaf(offset, *, tokens=1000, cost=0.01, claude=CLAUDE_A, source="langfuse"):
+    return Leaf(
+        "llm",
+        "claude_code.llm_request",
+        T0 + offset,
+        T0 + offset + 1,
+        claude=claude,
+        input_tokens=tokens,
+        input_cost=cost,
+        source=source,
+    )
+
+
+def file_leaf(offset, tool, path, claude=CLAUDE_A):
+    return Leaf("tool", tool, T0 + offset, T0 + offset + 1, claude=claude, file_path=path)
+
+
+def test_compute_rule_costs_prices_the_rules_share_of_each_call_capped_at_the_whole_input():
+    rules = [ev.RuleSize("guidelines", 400, 100, False)]
+    leaves = [
+        llm_leaf(0),
+        llm_leaf(10, cost=0.0, source="raw"),  # a raw-only call has no input cost
+        llm_leaf(20, tokens=50, cost=0.005),  # the rule is larger than the call's whole input
+    ]
+
+    costs = ev.compute_rule_costs(leaves, rules, [])
+
+    assert costs["guidelines"]["loaded_requests"] == 3
+    assert costs["guidelines"]["cost_usd"] == pytest.approx(0.001 + 0 + 0.005)
+
+
+@pytest.mark.parametrize(
+    "globs,path,loaded",
+    [
+        pytest.param(("**/*.py",), "/w/x/scripts/a.py", 1, id="double-star"),
+        pytest.param(("bin/*",), "/w/x/bin/claude-spoke", 1, id="repo-relative-suffix"),
+        pytest.param(("**/*.{py,sh}",), "/w/x/hooks/run.sh", 1, id="braces"),
+        pytest.param(("**",), "/w/x/anything", 1, id="everything"),
+        pytest.param(("bin/*",), "/w/x/bin/sub/a", None, id="star-stops-at-slash"),
+        pytest.param(("**/*.py",), "/w/x/README.md", None, id="no-match"),
+        pytest.param(("bin/*",), "/w/x/abin/run", None, id="suffix-only-at-slash-boundary"),
+    ],
+)
+def test_compute_rule_costs_loads_a_path_scoped_rule_at_the_first_matching_file_tool(
+    globs, path, loaded
+):
+    rules = [ev.RuleSize("scoped", 400, 100, True, globs)]
+    leaves = [llm_leaf(0), llm_leaf(10), file_leaf(12, "Read", path), llm_leaf(20)]
+
+    costs = ev.compute_rule_costs(leaves, rules, [])
+
+    assert {n: c["loaded_requests"] for n, c in costs.items()} == ({"scoped": loaded} if loaded else {})
+
+
+def test_compute_rule_costs_loads_on_demand_rules_at_their_first_read_per_claude_session():
+    on_demand = [ev.RuleSize("workflow", 400, 100, False), ev.RuleSize("unread", 400, 100, False)]
+    scoped = ev.RuleSize("scoped", 400, 100, True, ("**/*.py",))
+    always = ev.RuleSize("guidelines", 400, 100, False)
+    read = Leaf(
+        "tool", "Bash", T0 + 4, T0 + 5, claude=CLAUDE_A, command="cat .ai-toolkit/rules/workflow.md"
+    )
+    leaves = [
+        llm_leaf(0),
+        read,
+        llm_leaf(10),
+        file_leaf(12, "Edit", "/w/a.py"),
+        llm_leaf(20),
+        llm_leaf(30, claude=CLAUDE_B),  # a re-dispatch starts again with the always-on rules
+        llm_leaf(40, claude=CLAUDE_B),
+    ]
+
+    costs = ev.compute_rule_costs(leaves, [always, scoped], on_demand)
+
+    assert {n: c["loaded_requests"] for n, c in costs.items()} == {
+        "guidelines": 5,
+        "scoped": 1,
+        "workflow": 2,
+    }
+
+
+def test_build_scores_publish_rule_costs_for_the_rules_that_were_loaded_only():
+    costs = {
+        "guidelines": {"cost_usd": 0.0031234567, "loaded_requests": 3},
+        "raw-only": {"cost_usd": 0.0, "loaded_requests": 2},
+    }
+
+    scores = {s["name"]: s for s in ev.build_scores(make_report(rule_costs=costs))}
+
+    assert scores["rule_guidelines_cost_usd"]["value"] == 0.003123
+    assert scores["rule_guidelines_loaded_requests"]["value"] == 3
+    assert scores["rule_raw-only_loaded_requests"]["dataType"] == "NUMERIC"
+    assert "rule_raw-only_cost_usd" not in scores
+
+
+@pytest.mark.parametrize(
+    "version,git_ok,cost",
+    [
+        pytest.param("abc123-dirty", True, 0.002, id="committed-text-of-a-dirty-version"),
+        pytest.param(None, True, 0.004, id="no-version-reads-the-current-file"),
+        pytest.param("abc123-dirty", False, 0.004, id="git-show-fails"),
+    ],
+)
+def test_analyse_session_sizes_each_rule_at_the_sessions_toolkit_commit(
+    tmp_path, version, git_ok, cost
+):
+    always, on_demand = tmp_path / "always", tmp_path / "rules"
+    always.mkdir()
+    on_demand.mkdir()
+    (always / "guidelines.md").write_text("x" * 800)
+    (on_demand / "workflow.md").write_text("x" * 800)
+    git_calls = []
+
+    def toolkit_run(args):
+        git_calls.append(args)
+        if not git_ok:
+            raise subprocess.CalledProcessError(128, args)
+        return "x" * 400
+
+    attrs = {"toolkit_version": version} if version else {}
+    observations = []
+    for start in (0, 10):
+        gen = make_obs(
+            "claude_code.llm_request", start, start + 1, type_="GENERATION", cost=0.05, **attrs
+        )
+        observations.append(gen | {"inputUsage": 1000, "inputCost": 0.01})
+    loader = ev.make_rule_loader(always, on_demand, toolkit_run)
+
+    rep = ev.analyse_session(
+        SPOKE, "ai-toolkit-observability", observations, [], None, [], lambda *_: "", load_rules=loader
+    )
+
+    assert rep.rule_costs["guidelines"]["loaded_requests"] == 2
+    assert rep.rule_costs["guidelines"]["cost_usd"] == pytest.approx(cost)
+    assert "workflow" not in rep.rule_costs  # never read
+    if version and git_ok:
+        assert ["git", "show", "abc123:shared/rules/guidelines.md"] in git_calls
+        assert ["git", "show", "abc123:shared/rules/on-demand/workflow.md"] in git_calls
+    elif not version:
+        assert git_calls == []
 
 
 def test_list_unused_rules_lists_rule_files_never_read(tmp_path):

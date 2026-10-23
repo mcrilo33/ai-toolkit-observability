@@ -359,9 +359,9 @@ def parse_lifecycle(comments: list[dict]) -> Lifecycle:
 
 
 def judged_reviews(life: Lifecycle, start: float, end: float) -> list[Review]:
-    """Return the rejections that judged a session spanning `start` to `end`.
+    """Return the reviews that judged a session spanning `start` to `end`.
 
-    A re-dispatch continues the same session, so every rejection posted during its spans
+    A re-dispatch continues the same session, so every review posted during its spans
     counts, plus the first one after them (the review of its last push) unless another
     verdict (blocked, attended round, landed) comes first: that one judged the session.
     """

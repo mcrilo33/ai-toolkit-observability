@@ -187,7 +187,7 @@ class SessionReport:
     gate_lane: str | None = None
     labels: list[str] = field(default_factory=list)
     landed: bool = False
-    review_tdd_followed: bool | None = None  # None: no rejection comment judged this session
+    review_tdd_followed: bool | None = None  # None: no review judged this session
     review_tests_weakened: bool | None = None
     rule_blockers: Counter = field(default_factory=Counter)  # rule name -> times blamed as a blocker
     rule_warnings: Counter = field(default_factory=Counter)

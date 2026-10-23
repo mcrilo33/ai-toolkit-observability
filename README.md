@@ -100,14 +100,22 @@ and `rule_<name>_reads`. Bash is split by the first program of the command (afte
 `cd <dir> &&`, `VAR=value`, `timeout <n>` or `env`) into `tool_bash-<group>_*`, where the group
 is one of `read` (grep, sed, cat, ls, ...), `git`, `gh`, `orca`, `test` (a bare `pytest` or `shellcheck`; `python -m pytest` counts as `python`),
 `python`, `toolkit` (a program under `.ai-toolkit/scripts/`) or `other`; `tool_Bash_*` is no
-longer sent. Only non-zero values are published, so a component that did not
-run, fail or block adds no score. A long wait is a tool call blocked on the user for 10 s or
-more; shorter waits are automatic permission checks. A session publishes at most
-3 x agents + 4 x tools + 3 x hook names + rules scores on top of its 18, where Bash adds up to
-8 groups x 4 scores instead of 4 (134 in total at most on the sessions scored so far, one POST
-each); a hook name is its event and matcher, so each MCP
-tool adds hook scores. A re-run overwrites a published score but never clears one that has since
-become zero, so sessions scored before the Bash split keep their `tool_Bash_*` scores. The
+longer sent. An MCP tool `mcp__<server>__<tool>` is grouped per server into `tool_mcp-<server>_*`;
+the collector's raw JSONL only says `mcp_tool` with no server, so a raw-only MCP call is
+published as `tool_mcp-unknown_*`. Only non-zero values are published, so a component that did
+not run, fail or block adds no score. The one exception is `rule_<name>_reads`: every on-demand
+rule in `--rules-dir` gets a score for every scored session, 0 when unread, so the "On-demand rule
+reads" widget lists the unused rules (a fixed cost of one score per rule, 6 today). Read a zero
+with care: `afk-answering`, `planning-hub` and `workflow` are mostly read by coordinator sessions,
+which send no telemetry, so for them 0 means "not tracked", not "unused". A long wait is a tool
+call blocked on the user for 10 s or more; shorter waits are automatic permission checks. A
+session publishes at most 3 x agents + 4 x tools + 3 x hook names + 1 x on-demand rules scores on
+top of its 18, where Bash adds up to 8 groups x 4 scores instead of 4 and the MCP tools add 4
+scores per server instead of 4 per tool; a hook name is its event and matcher, so each MCP tool
+adds hook scores. A re-run overwrites a published score but never clears one that has since
+become zero, so sessions scored before the Bash split keep their `tool_Bash_*` scores and
+sessions scored before the MCP grouping keep their `tool_mcp__*` scores, with the new names added
+next to them. The
 always-on rule sizes are not scored:
 they are read from the current checkout, so a re-run would rewrite history with today's sizes.
 

@@ -3,6 +3,7 @@ import itertools
 import json
 import subprocess
 import urllib.error
+from collections import Counter
 from pathlib import Path
 
 import evaluate as ev
@@ -142,6 +143,14 @@ TDD_BLOCKER = "(1) tdd_followed is false: add the failing test that proves the b
 WEAKENED_BLOCKER = "(2) tests_weakened: the diff weakens or skips tests"
 
 
+def verdict_comment(
+    offset_s, verdict="APPROVE", *, tdd=True, weakened=False, blockers=(), warnings=()
+):
+    payload = {"v": 1, "sha": "abc1234", "verdict": verdict, "tdd_followed": tdd}
+    payload |= {"tests_weakened": weakened, "blockers": list(blockers), "warnings": list(warnings)}
+    return comment(offset_s, f"review-verdict: {json.dumps(payload)}")
+
+
 def test_parse_lifecycle_records_each_review_rejection_with_its_two_flags():
     comments = [
         comment(100, REJECTION.format(n=1, blockers=f"{TDD_BLOCKER} {WEAKENED_BLOCKER}")),
@@ -150,6 +159,15 @@ def test_parse_lifecycle_records_each_review_rejection_with_its_two_flags():
         comment(400, "blocked: review still rejects after 2 rounds"),
         comment(500, "Free text: tests_weakened: the diff weakens or skips tests"),
         comment(600, REJECTION.format(n=3, blockers="(1) a quote of tests_weakened: in prose")),
+        verdict_comment(700, warnings=["none", "code-quality"]),
+        verdict_comment(800, "REQUEST_CHANGES", tdd=False, weakened=True, blockers=["security"] * 2),
+        comment(850, REJECTION.format(n=1, blockers=f"{TDD_BLOCKER} {WEAKENED_BLOCKER}")),
+        comment(900, "review-verdict: {not json"),
+        comment(910, 'review-verdict: {"v":2,"tdd_followed":false}'),
+        comment(920, 'review-verdict: ["v", 1]'),
+        comment(930, 'review-verdict: {"v":1,"tdd_followed":true,"blockers":"security"}'),
+        comment(950, REJECTION.format(n=2, blockers=TDD_BLOCKER)),
+        comment(1000, "round 4 (attended, decided by the user): x"),
     ]
 
     life = ev.parse_lifecycle(comments)
@@ -158,7 +176,17 @@ def test_parse_lifecycle_records_each_review_rejection_with_its_two_flags():
         (100, True, True),
         (200, False, False),
         (600, False, False),
+        (700, False, False),
+        (800, True, True),
+        (950, True, False),
     ]
+    assert [(r.blockers, r.warnings) for r in life.reviews[2:]] == [
+        ((), ()),
+        ((), ("none", "code-quality")),
+        (("security", "security"), ()),
+        ((), ()),
+    ]
+    assert [t - T0 for t in life.verdicts] == [300, 400, 1000]  # a verdict never closes a window
 
 
 def build_account(leaves, comments, commits=()):
@@ -526,14 +554,19 @@ def test_analyse_session_takes_the_rejections_posted_during_its_spans_and_the_on
         comment(900, REJECTION.format(n=2, blockers="(1) a naming nit")),
         comment(1200, REJECTION.format(n=3, blockers=TDD_BLOCKER)),
         comment(1250, "blocked: review still rejects after 2 rounds"),
-        comment(1500, REJECTION.format(n=1, blockers=WEAKENED_BLOCKER)),
+        verdict_comment(1500, "REQUEST_CHANGES", weakened=True, blockers=["security"] * 2),
+        comment(1510, REJECTION.format(n=1, blockers=WEAKENED_BLOCKER)),
+        verdict_comment(1900, warnings=["none", "code-quality"]),
         comment(2000, "landed in abc1234"),
     ]
     issue = {"number": 1, "title": "t", "body": "Gate: plan", "labels": [], "comments": comments}
 
-    def verdict(*spans):
+    def report(*spans):
         obs = [make_obs("tool:Bash", start, end) for start, end in spans]
-        rep = ev.analyse_session(SPOKE, "ai-toolkit-observability", obs, [], issue, [], lambda *_: "")
+        return ev.analyse_session(SPOKE, "ai-toolkit-observability", obs, [], issue, [], lambda *_: "")
+
+    def verdict(*spans):
+        rep = report(*spans)
         return rep.review_tdd_followed, rep.review_tests_weakened
 
     assert verdict((0, 60)) == (True, True)  # only the first rejection
@@ -541,8 +574,13 @@ def test_analyse_session_takes_the_rejections_posted_during_its_spans_and_the_on
     assert verdict((0, 60), (200, 800)) == (True, True)  # a re-dispatch: rounds 1 and 2
     assert verdict((1000, 1100)) == (False, False)
     assert verdict((1210, 1240)) == (None, None)  # a blocked: verdict closes the window
-    assert verdict((1300, 1400)) == (True, True)
-    assert verdict((1600, 1700)) == (None, None)  # approved and landed
+    assert verdict((1300, 1400)) == (True, True)  # the verdict and its round comment, once
+    assert verdict((1600, 1700)) == (True, False)  # approved and landed
+
+    rejected, approved = report((1300, 1400)), report((1600, 1700))
+    assert (rejected.rule_blockers, rejected.rule_warnings) == ({"security": 2}, {})
+    assert (approved.rule_blockers, approved.rule_warnings) == ({}, {"none": 1, "code-quality": 1})
+    assert report((0, 60)).rule_blockers == {}  # a verdict-less rejection names no rule
 
 
 def test_build_scores_publish_component_scores_summed_over_steps_without_zeros():
@@ -575,10 +613,14 @@ def test_build_scores_publish_component_scores_summed_over_steps_without_zeros()
         ev.build_leaves(observations, raw_only), raw, [comment(1000, "Gate answered")]
     )
 
+    report = make_report(
+        attribution=attribution,
+        rule_blockers=Counter(security=2),
+        rule_warnings=Counter({"none": 1, "code-quality": 3}),
+    )
+
     scores = ev.build_scores(
-        make_report(attribution=attribution),
-        on_demand_rules=["bug-triage", "workflow"],
-        toolkit_agents=["code-review", "debug"],
+        report, on_demand_rules=["bug-triage", "workflow"], toolkit_agents=["code-review", "debug"]
     )
 
     published = {s["name"]: s["value"] for s in scores}
@@ -612,6 +654,9 @@ def test_build_scores_publish_component_scores_summed_over_steps_without_zeros()
             "agent_debug_calls": 0,
             "rule_bug-triage_reads": 1,
             "rule_workflow_reads": 0,
+            "rule_security_blockers": 2,
+            "rule_none_warnings": 1,
+            "rule_code-quality_warnings": 3,
         }
     )
     assert not {"agent_debug_cost_usd", "agent_debug_llm_s"} & published.keys()
@@ -620,9 +665,7 @@ def test_build_scores_publish_component_scores_summed_over_steps_without_zeros()
     assert [s["id"] for s in scores] == [
         s["id"]
         for s in ev.build_scores(
-            make_report(attribution=attribution),
-            on_demand_rules=["bug-triage", "workflow"],
-            toolkit_agents=["code-review", "debug"],
+            report, on_demand_rules=["bug-triage", "workflow"], toolkit_agents=["code-review", "debug"]
         )
     ]
     assert len({s["id"] for s in scores}) == len(scores)

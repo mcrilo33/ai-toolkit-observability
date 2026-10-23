@@ -812,7 +812,7 @@ def test_fetch_observations_follows_the_cursor():
 
 
 # The World session: 16 session-level scores plus its component scores (14 with the raw hooks).
-WORLD_SCORES, WORLD_SCORES_NO_RAW = 30, 28
+WORLD_SCORES, WORLD_SCORES_NO_RAW = 31, 29
 
 
 class World:
@@ -1074,7 +1074,7 @@ def test_main_routes_each_session_to_the_gh_and_git_of_its_own_repo(tmp_path, ca
     assert world.main("--repo", f"ai-toolkit=owner/ai-toolkit={checkout}") == 0
 
     out = capsys.readouterr().out
-    assert len(world.posted_ids()) == 50  # two sessions of issue #1 in two repos do not collide
+    assert len(world.posted_ids()) == 53  # two sessions of issue #1 in two repos do not collide
     assert "feat: toolkit work" in out and "feat: x" in out
     views = [a[a.index("-R") + 1] for a in world.run_calls if a[:3] == ["gh", "issue", "view"]]
     assert sorted(views) == ["owner/ai-toolkit", CWD_SLUG]

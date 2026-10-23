@@ -189,6 +189,8 @@ class SessionReport:
     landed: bool = False
     review_tdd_followed: bool | None = None  # None: no rejection comment judged this session
     review_tests_weakened: bool | None = None
+    rule_blockers: Counter = field(default_factory=Counter)  # rule name -> times blamed as a blocker
+    rule_warnings: Counter = field(default_factory=Counter)
     review_rounds: int = 0
     redispatches: int = 0
     blocked_comments: int = 0
@@ -263,6 +265,8 @@ def build_scores(
         numeric[f"step_{step}_cost_usd"] = slot.cost_usd
         numeric[f"step_{step}_active_s"] = slot.active_s
     numeric |= _component_measures(rep.attribution, on_demand_rules, toolkit_agents)
+    for kind, counts in (("blockers", rep.rule_blockers), ("warnings", rep.rule_warnings)):
+        numeric |= {f"rule_{name}_{kind}": n for name, n in counts.items() if n}
     scores = [_score(rep, n, round(float(v), 6), "NUMERIC") for n, v in numeric.items()]
     scores.append(_score(rep, "landed", int(rep.landed), "BOOLEAN"))
     for name in ("review_tdd_followed", "review_tests_weakened"):

@@ -295,6 +295,8 @@ def analyse_session(session, repo, observations, raw, issue, commits, run) -> Se
         landed=is_landed(life, run),
         review_tdd_followed=not any(r.tdd_failed for r in judged) if judged else None,
         review_tests_weakened=any(r.tests_weakened for r in judged) if judged else None,
+        rule_blockers=Counter(n for r in judged for n in r.blockers),
+        rule_warnings=Counter(n for r in judged for n in r.warnings),
         blocked_comments=life.blocked_count,
         **counts,
         accounting=account_time(leaves, life, commits),

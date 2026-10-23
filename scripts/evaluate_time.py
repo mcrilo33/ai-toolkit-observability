@@ -244,11 +244,17 @@ class Wait:
 
 @dataclass(slots=True, frozen=True)
 class Review:
-    """A coordinator review rejection: when it was posted and which flags its blockers hold."""
+    """A review outcome: when it was posted, its flags and the rule names it blamed.
+
+    A `review-verdict` comment gives every field; an old coordinator rejection gives the flags
+    only, with no rule names.
+    """
 
     at: float
     tdd_failed: bool
     tests_weakened: bool
+    blockers: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -264,6 +270,24 @@ class Lifecycle:
 REJECTION = re.compile(r"round \d+: address: the independent review requested changes")
 TDD_BLOCKER = re.compile(r"\(\d+\) tdd_followed is false:")
 WEAKENED_BLOCKER = re.compile(r"\(\d+\) tests_weakened:")
+
+
+def _parse_verdict(body: str, at: float) -> Review | None:
+    """Return the review that a `review-verdict: {...}` comment records, or None if malformed."""
+    try:
+        v = json.loads(body.removeprefix("review-verdict: "))
+        if v["v"] != 1:
+            return None
+        blockers, warnings = v["blockers"], v["warnings"]
+        if not (isinstance(blockers, list) and isinstance(warnings, list)):
+            return None
+        if not all(isinstance(n, str) for n in (*blockers, *warnings)):
+            return None
+        return Review(
+            at, not v["tdd_followed"], bool(v["tests_weakened"]), tuple(blockers), tuple(warnings)
+        )
+    except (ValueError, TypeError, KeyError):
+        return None
 
 
 def _tool_of(body: str) -> str:
@@ -283,6 +307,7 @@ def parse_lifecycle(comments: list[dict]) -> Lifecycle:
     life = Lifecycle()
     open_permissions: list[tuple[float, str]] = []
     gate_open: float | None = None
+    after_verdict = False  # the last review comment was a review-verdict
 
     def close_gate(at: float, answered: bool) -> None:
         nonlocal gate_open
@@ -306,11 +331,18 @@ def parse_lifecycle(comments: list[dict]) -> Lifecycle:
                 )
         elif body.startswith("A gate question needs a human"):
             gate_open = at if gate_open is None else gate_open  # a re-ask keeps the first time
+        elif body.startswith("review-verdict: "):
+            if review := _parse_verdict(body, at):
+                life.reviews.append(review)
+                after_verdict = True
         elif REJECTION.match(body):
-            # review.sh's numbered blocker lines, never free text
-            life.reviews.append(
-                Review(at, bool(TDD_BLOCKER.search(body)), bool(WEAKENED_BLOCKER.search(body)))
-            )
+            # the coordinator's copy of a verdict is that same review: counted once
+            if not after_verdict:
+                # review.sh's numbered blocker lines, never free text
+                life.reviews.append(
+                    Review(at, bool(TDD_BLOCKER.search(body)), bool(WEAKENED_BLOCKER.search(body)))
+                )
+            after_verdict = False
         elif body.startswith("round "):
             life.verdicts.append(at)  # an attended round: decided by the user, no flags
         elif body.startswith("blocked:"):

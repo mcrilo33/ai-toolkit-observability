@@ -327,6 +327,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("--url", default=LANGFUSE_URL, help="Langfuse base URL")
     ap.add_argument("--raw-dir", type=Path, default=Path.home() / ".ai-toolkit" / "otel-raw")
     ap.add_argument("--rules-dir", type=Path, default=Path(".ai-toolkit/rules"))
+    ap.add_argument("--agents-dir", type=Path, default=Path(".claude/agents"))
     ap.add_argument("--always-on-dir", type=Path, default=Path(".claude/rules/ai-toolkit"))
     ap.add_argument("--no-publish", action="store_true", help="print the report, push no scores")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
@@ -443,6 +444,7 @@ def main(argv: list[str] | None = None, *, http=None, run=None) -> int:
         selected, skipped = _select_sessions(args, observations, raw, repos)
         reports = _analyse_selected(selected, observations, raw, repos, run)
         rule_names = sorted(p.stem for p in args.rules_dir.glob("*.md"))
+        agent_names = sorted(p.stem for p in args.agents_dir.glob("*.md"))
         agg = aggregate(
             reports,
             unused_rules=list_unused_rules(
@@ -462,7 +464,7 @@ def main(argv: list[str] | None = None, *, http=None, run=None) -> int:
                     s
                     for r in reports
                     if r.issue
-                    for s in build_scores(r, on_demand_rules=rule_names)
+                    for s in build_scores(r, on_demand_rules=rule_names, toolkit_agents=agent_names)
                 ],
             )
     except EvalError as e:

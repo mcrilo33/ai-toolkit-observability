@@ -213,29 +213,42 @@ def _score(rep: SessionReport, name: str, value, data_type: str) -> dict:
 
 
 def _component_measures(
-    attribution: Attribution, on_demand_rules: Iterable[str]
+    attribution: Attribution, on_demand_rules: Iterable[str], toolkit_agents: Iterable[str]
 ) -> dict[str, float]:
     """Sum each component's measures over the steps, keeping only the non-zero ones.
 
     A component that did not run, or never failed or waited, publishes nothing: a dashboard
     sums a missing point as zero, and the per-session score count stays bounded by what ran.
-    The one exception is an on-demand rule's reads, always published so that an unused rule
-    shows up on the dashboard.
+    The exceptions are always published so that an unused one shows up on the dashboard: an
+    on-demand rule's reads and a toolkit agent's calls. A hook's mean time per run is
+    published whenever the hook ran, even at 0 ms, and never otherwise.
     """
-    totals: Counter = Counter({f"rule_{name}_reads": 0 for name in on_demand_rules})
+    always = [f"rule_{name}_reads" for name in on_demand_rules]
+    always += [f"agent_{name}_calls" for name in toolkit_agents]
+    totals: Counter = Counter(dict.fromkeys(always, 0))
     for prefix, table, measures in COMPONENT_SCORES:
         for (_step, name), stats in getattr(attribution, table).items():
             for measure in measures:
                 totals[f"{prefix}_{name}_{measure}"] += stats[measure]
     for name, reads in attribution.rules.items():
         totals[f"rule_{name}_reads"] += reads
-    return {name: v for name, v in totals.items() if v or name.startswith("rule_")}
+    for name in {name for _step, name in attribution.hooks}:
+        if runs := totals[f"hook_{name}_runs"]:
+            always.append(f"hook_{name}_avg_ms")
+            totals[f"hook_{name}_avg_ms"] = totals[f"hook_{name}_total_ms"] / runs
+    return {name: v for name, v in totals.items() if v or name in always}
 
 
-def build_scores(rep: SessionReport, *, on_demand_rules: Iterable[str] = ()) -> list[dict]:
+def build_scores(
+    rep: SessionReport,
+    *,
+    on_demand_rules: Iterable[str] = (),
+    toolkit_agents: Iterable[str] = (),
+) -> list[dict]:
     """Build a session's Langfuse scores; ids are deterministic, so a re-run upserts.
 
     `on_demand_rules` names every on-demand rule, each scored `rule_<name>_reads` even at 0.
+    `toolkit_agents` names every toolkit agent, each scored `agent_<name>_calls` even at 0.
     """
     acct = rep.accounting
     numeric = {
@@ -249,7 +262,7 @@ def build_scores(rep: SessionReport, *, on_demand_rules: Iterable[str] = ()) -> 
     for step, slot in acct.steps.items():
         numeric[f"step_{step}_cost_usd"] = slot.cost_usd
         numeric[f"step_{step}_active_s"] = slot.active_s
-    numeric |= _component_measures(rep.attribution, on_demand_rules)
+    numeric |= _component_measures(rep.attribution, on_demand_rules, toolkit_agents)
     scores = [_score(rep, n, round(float(v), 6), "NUMERIC") for n, v in numeric.items()]
     scores.append(_score(rep, "landed", int(rep.landed), "BOOLEAN"))
     for name in ("review_tdd_followed", "review_tests_weakened"):

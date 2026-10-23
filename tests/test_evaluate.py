@@ -1049,7 +1049,7 @@ def test_fetch_observations_follows_the_cursor():
 
 
 # The World session: 16 session-level scores plus its component scores (17 with the raw hooks).
-WORLD_SCORES, WORLD_SCORES_NO_RAW = 33, 30
+WORLD_SCORES, WORLD_SCORES_NO_RAW = 35, 32
 
 
 class World:
@@ -1157,6 +1157,9 @@ def test_main_reports_one_session_and_a_rerun_posts_the_same_score_ids(tmp_path,
     assert "raw JSONL covers only" in out and "lower bound" in out
     assert "PreToolUse:Bash" in out and "bug-triage" in out and "Zero-use rules: workflow" in out
     assert len(first) == WORLD_SCORES and world.posted_ids() == sorted(first * 2)
+    posted = {c[2]["name"] for c in world.http_calls if c[0] == "POST"}
+    assert {"rule_guidelines_loaded_requests", "rule_bug-triage_loaded_requests"} <= posted
+    assert not {n for n in posted if n.startswith("rule_") and n.endswith("_cost_usd")}
     assert {c[2]["environment"] for c in world.http_calls if c[0] == "POST"} == {
         "ai-toolkit-observability"
     }
@@ -1316,7 +1319,7 @@ def test_main_routes_each_session_to_the_gh_and_git_of_its_own_repo(tmp_path, ca
     assert world.main("--repo", f"ai-toolkit=owner/ai-toolkit={checkout}") == 0
 
     out = capsys.readouterr().out
-    assert len(world.posted_ids()) == 57  # two sessions of issue #1 in two repos do not collide
+    assert len(world.posted_ids()) == 60  # two sessions of issue #1 in two repos do not collide
     assert "feat: toolkit work" in out and "feat: x" in out
     views = [a[a.index("-R") + 1] for a in world.run_calls if a[:3] == ["gh", "issue", "view"]]
     assert sorted(views) == ["owner/ai-toolkit", CWD_SLUG]

@@ -811,7 +811,7 @@ def test_fetch_observations_follows_the_cursor():
     assert "fromStartTime" not in seen[0]
 
 
-# The World session: 16 session-level scores plus its component scores (14 with the raw hooks).
+# The World session: 16 session-level scores plus its component scores (15 with the raw hooks).
 WORLD_SCORES, WORLD_SCORES_NO_RAW = 31, 29
 
 

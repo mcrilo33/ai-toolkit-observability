@@ -96,7 +96,7 @@ Components are scores too, summed over the steps, one score name per component b
 Langfuse dashboard widget groups scores by name and has no comment or metadata dimension:
 `agent_<name>_{cost_usd,calls,llm_s}` (`main` included),
 `tool_<name>_{calls,failures,long_waits,long_wait_s}`, `hook_<name>_{runs,total_ms,blocking,avg_ms}`
-`rule_<name>_reads` and the review's violation counts `rule_<name>_{blockers,warnings}`: how many times
+`rule_<name>_reads`, the context cost `rule_<name>_{cost_usd,loaded_requests}` (below) and the review's violation counts `rule_<name>_{blockers,warnings}`: how many times
 the reviews that judged the session named that rule as a blocker or a warning (a rule named twice
 counts twice), `none` being a finding no rule covers. Bash is split by the first program of the command (after a leading
 `cd <dir> &&`, `VAR=value`, `timeout <n>` or `env`) into `tool_bash-<group>_*`, where the group
@@ -120,14 +120,44 @@ which send no telemetry, so for them 0 means "not tracked", not "unused". A long
 call blocked on the user for 10 s or more; shorter waits are automatic permission checks. A
 session publishes at most 3 x agents + 4 x tools + 4 x hook names + 1 x on-demand rules + 1 x toolkit agents
 plus 2 x review rule names (up to 38 in the worst case, 2 x the 18 rules plus `none`; a handful in practice)
-scores on top of its 18, where Bash adds up to 8 groups x 4 scores instead of 4 and the MCP tools add 4
+plus 2 x rules (up to 36, the 18 rules; non-zero only) scores on top of its 18, where Bash adds up to 8 groups x 4 scores instead of 4 and the MCP tools add 4
 scores per server instead of 4 per tool; a hook name is its event and matcher, so each MCP tool
 adds hook scores. A re-run overwrites a published score but never clears one that has since
 become zero, so sessions scored before the Bash split keep their `tool_Bash_*` scores and
 sessions scored before the MCP grouping keep their `tool_mcp__*` scores, with the new names added
-next to them. The
-always-on rule sizes are not scored:
-they are read from the current checkout, so a re-run would rewrite history with today's sizes.
+next to them.
+
+`rule_<name>_cost_usd` is what a rule cost the session in input tokens: the sum, over the LLM
+calls in which the rule was in context, of `min(rule_tokens / call_input_tokens, 1) x
+call_input_cost`, so it uses each call's real prices and caching (a rule is mostly paid at the
+cache-read price). `rule_<name>_loaded_requests` counts those calls. Both are non-zero only, so a
+rule that never loaded publishes neither. Compare `loaded_requests` with the session's LLM calls
+(the sum of `agent_*_calls`) to see how much a `paths:` scoping saves.
+
+A rule is in context, per Claude session (a re-dispatch starts a fresh context), from:
+
+- its first LLM call, for an always-on rule without `paths:`;
+- the first `Read`, `Edit` or `Write` whose path matches one of its `paths:` globs, for a
+  path-scoped rule. The globs are repo-relative and the paths absolute, so a glob matches the
+  path or any suffix of it that starts after a `/`; `**`, `*`, `?` and `{a,b}` are supported;
+- its first read, detected as for `rule_<name>_reads`, for an on-demand rule;
+
+and stays until the session ends. Rule sizes are `characters / 4` of the text at the session's
+toolkit commit, read with `git show <sha>:shared/rules/[on-demand/]<name>.md` in the checkout
+mapped as `ai-toolkit` (the `--repo ai-toolkit=...` of the sweep); the commit is the
+`toolkit_version` attribute of the session's spans, minus `-dirty`. A session without a version
+(before ai-toolkit #478), an unmapped `ai-toolkit` or a failing `git show` uses the file in
+`--always-on-dir` / `--rules-dir` as it is today. Approximations:
+
+- Path-scoped loading is approximated by the first matching `Read`/`Edit`/`Write`; Claude
+  Code's real trigger may differ.
+- Sub-agent calls in the same Claude session are treated like the main context.
+- Context compaction is ignored: a rule stays loaded.
+- Tokens are `characters / 4`, and a `-dirty` version uses the committed text.
+- A raw-only LLM call (no Langfuse span) counts in `loaded_requests` but adds no cost, as the
+  raw JSONL has no input cost.
+- Only the rules present in the current directories are listed, and one added after the
+  session's commit is measured with today's text.
 
 ### Which source answers which metric
 
@@ -146,7 +176,8 @@ they are read from the current checkout, so a re-run would rewrite history with 
 | `review_rounds` | `sub-agent:code-review` spans, or raw `Agent` tool results with `subagent_type` `code-review`; the larger count | Comments and commits carry no review marker; a lower bound when telemetry is incomplete |
 | `redispatches` | Distinct Claude `session.id` in Langfuse and the raw JSONL, minus one, or the `blocked:` comment count if larger | A lower bound when telemetry is incomplete |
 | On-demand rule loads | `Read` of `.ai-toolkit/rules/<name>.md`, or a Bash `cat`/`sed`/`head`/`grep` of it | Workers use Bash, so both count |
-| Always-on rule size | Files in `.claude/rules/ai-toolkit/` | `characters / 4`; `paths:` frontmatter marks a rule path-scoped |
+| Always-on rule size | Files in `.claude/rules/ai-toolkit/` (the terminal table), and per session `git show <toolkit_version>:shared/rules/<name>.md` | `characters / 4`; `paths:` frontmatter marks a rule path-scoped |
+| `rule_<name>_cost_usd`, `rule_<name>_loaded_requests` | Per LLM call `inputUsage` / `inputCost` (raw: the three input token counts, no cost), the rule text above and the load model above | Approximations listed above |
 
 ### How time is segmented
 

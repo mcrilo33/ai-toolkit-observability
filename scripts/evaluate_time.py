@@ -46,6 +46,8 @@ class Leaf:
     end: float
     cost: float = 0.0
     tokens: int = 0
+    input_tokens: int = 0
+    input_cost: float = 0.0
     claude: str = ""
     agent: str | None = None
     command: str = ""
@@ -99,6 +101,10 @@ def _leaves_from_raw(raw_records: list[dict], seen: set[str]) -> list[Leaf]:
                     ended,
                     cost=float(a.get("cost_usd", 0)),
                     tokens=sum(int(a.get(k, 0)) for k in counts),
+                    input_tokens=sum(
+                        int(a.get(k, 0))
+                        for k in ("input_tokens", "cache_read_tokens", "cache_creation_tokens")
+                    ),
                     claude=a.get("session.id", ""),
                     source="raw",
                 )
@@ -158,6 +164,8 @@ def build_leaves(observations: list[dict], raw_records: list[dict] = ()) -> list
                 end=parse_time(o.get("endTime") or o["startTime"]),
                 cost=o.get("totalCost") or 0.0,
                 tokens=(o.get("usageDetails") or {}).get("total", 0),
+                input_tokens=o.get("inputUsage") or 0,
+                input_cost=o.get("inputCost") or 0.0,
                 claude=_attr(o, "session.id", ""),
                 agent=_find_agent(o, by_id),
                 command=_attr(o, "full_command", ""),

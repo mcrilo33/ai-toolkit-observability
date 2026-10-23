@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import functools
 import json
 import os
 import re
@@ -33,6 +34,7 @@ from evaluate_report import (
     aggregate,
     attribute,
     build_scores,
+    compute_rule_costs,
     list_unused_rules,
     make_http,
     measure_rule_sizes,
@@ -78,6 +80,7 @@ __all__ = [
     "attribute",
     "build_leaves",
     "build_scores",
+    "compute_rule_costs",
     "count_claude_sessions",
     "count_dispatches",
     "fetch_observations",
@@ -88,6 +91,7 @@ __all__ = [
     "load_raw",
     "main",
     "make_http",
+    "make_rule_loader",
     "measure_rule_sizes",
     "parse_lifecycle",
     "parse_repo",
@@ -215,6 +219,46 @@ def load_issue(run, number: int) -> dict:
         ) from None
 
 
+# --------------------------------------------------------------------------- rules at a commit
+
+
+def toolkit_version(observations: list[dict]) -> str | None:
+    """Return the toolkit commit of a session (first non-empty `toolkit_version`, `-dirty` cut)."""
+    for o in observations:
+        if version := o["metadata"].get("attributes.toolkit_version"):
+            return version.removesuffix("-dirty")
+    return None
+
+
+def make_rule_loader(always_on_dir: Path, rules_dir: Path, run):
+    """Return `load(version) -> (always-on, on-demand rule sizes)`, cached per toolkit commit.
+
+    `run` is scoped to the ai-toolkit checkout (None when it is not mapped). A rule is read
+    with `git show <version>:shared/rules/[on-demand/]<name>.md`, and from the current file when
+    the version is unknown, `run` is None or git cannot show it.
+    """
+
+    def reader(version: str | None, subdir: str):
+        def read(path: Path) -> str:
+            if version and run:
+                try:
+                    return run(["git", "show", f"{version}:shared/rules/{subdir}{path.name}"])
+                except subprocess.CalledProcessError:
+                    pass
+            return path.read_text()
+
+        return read
+
+    @functools.cache
+    def load(version: str | None):
+        return (
+            measure_rule_sizes(always_on_dir, reader(version, "")),
+            measure_rule_sizes(rules_dir, reader(version, "on-demand/")),
+        )
+
+    return load
+
+
 # --------------------------------------------------------------------------- pipeline
 
 
@@ -245,12 +289,16 @@ def _describe_partial_raw(raw: list[dict], leaves: list) -> str | None:
     )
 
 
-def analyse_session(session, repo, observations, raw, issue, commits, run) -> SessionReport:
+def analyse_session(
+    session, repo, observations, raw, issue, commits, run, *, load_rules=None
+) -> SessionReport:
     """Build the report of one session from its observations, raw records, issue and commits.
 
-    `run` must already be scoped to the session's repo (see `_scoped`).
+    `run` must already be scoped to the session's repo (see `_scoped`). `load_rules` is a
+    `make_rule_loader` result; without it no rule cost is computed.
     """
     leaves = build_leaves(observations, raw)
+    always_on, on_demand = load_rules(toolkit_version(observations)) if load_rules else ([], [])
     life = parse_lifecycle(issue["comments"]) if issue else Lifecycle()
     stepper = Stepper(leaves, life, commits)
     counts = count_dispatches(observations, raw, life)
@@ -301,6 +349,7 @@ def analyse_session(session, repo, observations, raw, issue, commits, run) -> Se
         **counts,
         accounting=account_time(leaves, life, commits),
         attribution=attribute(leaves, raw, stepper),
+        rule_costs=compute_rule_costs(leaves, always_on, on_demand),
         notes=notes,
         started=min((lf.start for lf in leaves), default=0.0),
     )
@@ -412,7 +461,7 @@ def _select_sessions(args, observations, raw, repos):
     return selected, {} if args.issue else skipped
 
 
-def _analyse_selected(selected, observations, raw, repos, run) -> list[SessionReport]:
+def _analyse_selected(selected, observations, raw, repos, run, load_rules) -> list[SessionReport]:
     """Load each selected session's issue and commits from its own repo and build its report."""
     runners = {name: _scoped(run, ref) for name, ref in repos.items()}
     keys = {k for k in selected.values() if k[1] is not None}
@@ -427,6 +476,7 @@ def _analyse_selected(selected, observations, raw, repos, run) -> list[SessionRe
             issues.get((name, n)),
             commits.get((name, n), []),
             runners[name],
+            load_rules=load_rules,
         )
         for s, (name, n) in selected.items()
     )
@@ -444,7 +494,9 @@ def main(argv: list[str] | None = None, *, http=None, run=None) -> int:
         observations = fetch_observations(http)
         raw = load_raw(args.raw_dir, {o["sessionId"] for o in observations if o.get("sessionId")})
         selected, skipped = _select_sessions(args, observations, raw, repos)
-        reports = _analyse_selected(selected, observations, raw, repos, run)
+        toolkit = _scoped(run, repos["ai-toolkit"]) if "ai-toolkit" in repos else None
+        load_rules = make_rule_loader(args.always_on_dir, args.rules_dir, toolkit)
+        reports = _analyse_selected(selected, observations, raw, repos, run, load_rules)
         rule_names = sorted(p.stem for p in args.rules_dir.glob("*.md"))
         agent_names = sorted(p.stem for p in args.agents_dir.glob("*.md"))
         agg = aggregate(

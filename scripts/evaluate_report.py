@@ -10,8 +10,9 @@ import re
 import urllib.error
 import urllib.request
 from collections import Counter, defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 
 from evaluate_time import STEPS, Accounting, EvalError, Leaf, Stepper, StepTime
@@ -34,6 +35,8 @@ NOT_A_READ = (  # commands that carry free text, where a path is quoted rather t
 # Most blocked_on_user spans are sub-second automatic permission checks; only a wait on the
 # user that lasts this long is signal worth a score.
 LONG_WAIT_S = 10
+FILE_TOOLS = ("Read", "Edit", "Write")  # what loads a path-scoped rule, as an approximation
+GLOB_TOKENS = {"**/": "(?:.*/)?", "**": ".*", "*": "[^/]*", "?": "[^/]", "{": "(?:", "}": ")"}
 # A fixed group list keeps the score count bounded; a raw program name would not.
 BASH_GROUPS = {
     **dict.fromkeys(("grep", "rg", "sed", "cat", "ls", "wc", "head", "tail", "find", "awk"), "read"),
@@ -94,6 +97,13 @@ def _rules_read_by_bash(command: str) -> set[str]:
     return names
 
 
+def _rules_read(leaf: Leaf) -> set[str]:
+    """Return the on-demand rules a tool leaf reads: a `Read` of the file or a Bash reader."""
+    if leaf.name == "Read" and (m := ON_DEMAND_RULE.search(leaf.file_path)):
+        return {m[1]}
+    return _rules_read_by_bash(leaf.command) if leaf.name == "Bash" else set()
+
+
 def bash_group(command: str) -> str:
     """Return the group of a Bash command's first real program (`other` when unknown)."""
     command = command.lstrip()
@@ -138,10 +148,7 @@ def attribute(leaves: list[Leaf], raw_records: list[dict], stepper: Stepper) -> 
             if leaf.blocked_s >= LONG_WAIT_S:
                 tool["long_waits"] += 1
                 tool["long_wait_s"] += leaf.blocked_s
-            if leaf.name == "Read" and (m := ON_DEMAND_RULE.search(leaf.file_path)):
-                out.rules[m[1]] += 1
-            elif leaf.name == "Bash":
-                out.rules.update(_rules_read_by_bash(leaf.command))
+            out.rules.update(_rules_read(leaf))
     for rec in raw_records:
         if rec["name"] != "claude_code.hook_execution_complete":
             continue
@@ -158,16 +165,82 @@ class RuleSize:
     chars: int
     tokens: int
     scoped: bool
+    globs: tuple[str, ...] = ()
 
 
-def measure_rule_sizes(rules_dir: Path) -> list[RuleSize]:
-    """Estimate the tokens each rule file adds (chars / 4); `paths:` frontmatter marks it scoped."""
+def measure_rule_sizes(
+    rules_dir: Path, read: Callable[[Path], str] = Path.read_text
+) -> list[RuleSize]:
+    """Estimate the tokens each rule file adds (chars / 4); `paths:` frontmatter marks it scoped.
+
+    `read` returns a rule's text, so a caller can supply the text at another commit; the
+    quoted globs under `paths:` (block or inline list) are kept for path matching.
+    """
     sizes = []
     for path in sorted(rules_dir.glob("*.md")):
-        text = path.read_text()
+        text = read(path)
         head = text.split("---", 2)[1] if text.startswith("---") and text.count("---") >= 2 else ""
-        sizes.append(RuleSize(path.stem, len(text), len(text) // 4, "paths:" in head))
+        paths = re.search(r"(?ms)^paths:(.*?)(?=^\S|\Z)", head)
+        globs = tuple(re.findall(r"""['"]([^'"]+)['"]""", paths[1])) if paths else ()
+        sizes.append(RuleSize(path.stem, len(text), len(text) // 4, "paths:" in head, globs))
     return sizes
+
+
+@cache
+def _glob_regex(glob: str) -> re.Pattern:
+    """Compile a repo-relative glob (`**`, `*`, `?`, `{a,b}`) into a full-match regex."""
+    out, depth = [], 0
+    for token in re.split(r"(\*\*/|\*\*|\*|\?|\{|\}|,)", glob):
+        depth += (token == "{") - (token == "}")
+        out.append("|" if token == "," and depth else GLOB_TOKENS.get(token, re.escape(token)))
+    return re.compile("".join(out))
+
+
+def _matches_any(globs: tuple[str, ...], path: str) -> bool:
+    """Tell whether a glob matches `path` or one of its suffixes starting after a `/`."""
+    parts = path.strip("/").split("/")
+    suffixes = ["/".join(parts[i:]) for i in range(len(parts))]
+    return any(_glob_regex(g).fullmatch(s) for g in globs for s in suffixes)
+
+
+def compute_rule_costs(
+    leaves: list[Leaf], always_on: list[RuleSize], on_demand: list[RuleSize]
+) -> dict[str, dict]:
+    """Return each rule's `cost_usd` and `loaded_requests` over the LLM calls it was in context.
+
+    Per Claude session (a re-dispatch starts a fresh context), an always-on rule loads at the
+    first call, a path-scoped one when a Read/Edit/Write matches a glob, an on-demand one at its
+    first read; it then stays until the session ends. Every call from there adds a request and,
+    when its input size is known, the rule's share of the call's input cost.
+    """
+    by_claude: dict[str, list[Leaf]] = defaultdict(list)
+    for leaf in leaves:
+        by_claude[leaf.claude].append(leaf)
+    costs: dict[str, dict] = {}
+    for group in by_claude.values():
+        calls = [lf for lf in group if lf.kind == "llm"]
+        first_read: dict[str, float] = {}
+        for lf in group:
+            for name in _rules_read(lf):
+                first_read[name] = min(lf.end, first_read.get(name, lf.end))
+        loads = {r: -math.inf for r in always_on if not r.scoped}
+        for rule in (r for r in always_on if r.scoped):
+            hits = [
+                lf.end
+                for lf in group
+                if lf.name in FILE_TOOLS and _matches_any(rule.globs, lf.file_path)
+            ]
+            if hits:
+                loads[rule] = min(hits)
+        loads |= {r: first_read[r.name] for r in on_demand if r.name in first_read}
+        for rule, loaded_at in loads.items():
+            for call in (c for c in calls if c.start >= loaded_at):
+                total = costs.setdefault(rule.name, dict(cost_usd=0.0, loaded_requests=0))
+                total["loaded_requests"] += 1
+                if call.input_tokens > 0:
+                    share = min(rule.tokens / call.input_tokens, 1)
+                    total["cost_usd"] += share * call.input_cost
+    return costs
 
 
 def list_unused_rules(rules_dir: Path, used: dict[str, int]) -> list[str]:
@@ -191,6 +264,7 @@ class SessionReport:
     review_tests_weakened: bool | None = None
     rule_blockers: Counter = field(default_factory=Counter)  # rule name -> times blamed as a blocker
     rule_warnings: Counter = field(default_factory=Counter)
+    rule_costs: dict[str, dict] = field(default_factory=dict)  # rule name -> cost_usd, loaded_requests
     review_rounds: int = 0
     redispatches: int = 0
     blocked_comments: int = 0
@@ -267,6 +341,8 @@ def build_scores(
     numeric |= _component_measures(rep.attribution, on_demand_rules, toolkit_agents)
     for kind, counts in (("blockers", rep.rule_blockers), ("warnings", rep.rule_warnings)):
         numeric |= {f"rule_{name}_{kind}": n for name, n in counts.items() if n}
+    for name, cost in rep.rule_costs.items():
+        numeric |= {f"rule_{name}_{k}": v for k, v in cost.items() if v}
     scores = [_score(rep, n, round(float(v), 6), "NUMERIC") for n, v in numeric.items()]
     scores.append(_score(rep, "landed", int(rep.landed), "BOOLEAN"))
     for name in ("review_tdd_followed", "review_tests_weakened"):

@@ -232,7 +232,7 @@ def _component_measures(
                 totals[f"{prefix}_{name}_{measure}"] += stats[measure]
     for name, reads in attribution.rules.items():
         totals[f"rule_{name}_reads"] += reads
-    for name in {name for _step, name in attribution.hooks}:
+    for name in dict.fromkeys(name for _step, name in attribution.hooks):
         if runs := totals[f"hook_{name}_runs"]:
             always.append(f"hook_{name}_avg_ms")
             totals[f"hook_{name}_avg_ms"] = totals[f"hook_{name}_total_ms"] / runs

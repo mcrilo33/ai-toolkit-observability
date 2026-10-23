@@ -223,10 +223,15 @@ def load_issue(run, number: int) -> dict:
 
 
 def toolkit_version(observations: list[dict]) -> str | None:
-    """Return the toolkit commit of a session (first non-empty `toolkit_version`, `-dirty` cut)."""
+    """Return the toolkit commit of a session (first non-empty `toolkit_version`, `-dirty` cut).
+
+    The value comes from span metadata and ends up in a git argument, so only a hex revision
+    is accepted.
+    """
     for o in observations:
         if version := o["metadata"].get("attributes.toolkit_version"):
-            return version.removesuffix("-dirty")
+            sha = version.removesuffix("-dirty")
+            return sha if re.fullmatch(r"[0-9a-f]{6,40}", sha) else None
     return None
 
 

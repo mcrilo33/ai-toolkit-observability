@@ -96,7 +96,8 @@ Components are scores too, summed over the steps, one score name per component b
 Langfuse dashboard widget groups scores by name and has no comment or metadata dimension:
 `agent_<name>_{cost_usd,calls,llm_s}` (`main` included),
 `tool_<name>_{calls,failures,long_waits,long_wait_s}`, `hook_<name>_{runs,total_ms,blocking,avg_ms}`
-`rule_<name>_reads`, the context cost `rule_<name>_{cost_usd,loaded_requests}` (below) and the review's violation counts `rule_<name>_{blockers,warnings}`: how many times
+`rule_<name>_reads`, the context cost `rule_<name>_{cost_usd,loaded_requests}` (below) and
+the review's violation counts `rule_<name>_{blockers,warnings}`: how many times
 the reviews that judged the session named that rule as a blocker or a warning (a rule named twice
 counts twice), `none` being a finding no rule covers. Bash is split by the first program of the command (after a leading
 `cd <dir> &&`, `VAR=value`, `timeout <n>` or `env`) into `tool_bash-<group>_*`, where the group
@@ -119,8 +120,9 @@ with care: `afk-answering`, `planning-hub` and `workflow` are mostly read by coo
 which send no telemetry, so for them 0 means "not tracked", not "unused". A long wait is a tool
 call blocked on the user for 10 s or more; shorter waits are automatic permission checks. A
 session publishes at most 3 x agents + 4 x tools + 4 x hook names + 1 x on-demand rules + 1 x toolkit agents
-plus 2 x review rule names (up to 38 in the worst case, 2 x the 18 rules plus `none`; a handful in practice)
-plus 2 x rules (up to 36, the 18 rules; non-zero only) scores on top of its 18, where Bash adds up to 8 groups x 4 scores instead of 4 and the MCP tools add 4
+plus 2 x review rule names (up to 38 in the worst case, 2 x the 18 rules plus `none`; a handful in
+practice) plus 2 x loaded rules (`cost_usd` and `loaded_requests`, up to 36 for the 18 rules)
+scores on top of its 18, where Bash adds up to 8 groups x 4 scores instead of 4 and the MCP tools add 4
 scores per server instead of 4 per tool; a hook name is its event and matcher, so each MCP tool
 adds hook scores. A re-run overwrites a published score but never clears one that has since
 become zero, so sessions scored before the Bash split keep their `tool_Bash_*` scores and

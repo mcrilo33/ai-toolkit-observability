@@ -10,6 +10,7 @@ import re
 import urllib.error
 import urllib.request
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -106,6 +107,16 @@ def bash_group(command: str) -> str:
     return BASH_GROUPS.get(program[0].rsplit("/", 1)[-1], "other")
 
 
+def mcp_group(name: str) -> str:
+    """Return `mcp-<server>` for an `mcp__<server>__<tool>` name, else the name unchanged.
+
+    The collector's raw JSONL names every MCP call `mcp_tool` with no server: `mcp-unknown`.
+    """
+    if name == "mcp_tool":
+        return "mcp-unknown"
+    return f"mcp-{name.split('__', 2)[1]}" if name.startswith("mcp__") else name
+
+
 def attribute(leaves: list[Leaf], raw_records: list[dict], stepper: Stepper) -> Attribution:
     """Attribute leaves and raw hook records to the step they started in."""
     out = Attribution()
@@ -119,7 +130,7 @@ def attribute(leaves: list[Leaf], raw_records: list[dict], stepper: Stepper) -> 
             agent["llm_s"] += leaf.end - leaf.start
         elif leaf.kind == "tool":
             agent["tool_calls"] += 1
-            name = f"bash-{bash_group(leaf.command)}" if leaf.name == "Bash" else leaf.name
+            name = f"bash-{bash_group(leaf.command)}" if leaf.name == "Bash" else mcp_group(leaf.name)
             tool = out.tools[(step, name)]
             tool["calls"] += 1
             tool["failures"] += leaf.failed
@@ -201,24 +212,31 @@ def _score(rep: SessionReport, name: str, value, data_type: str) -> dict:
     return score | {"environment": rep.environment} if rep.environment else score
 
 
-def _component_measures(attribution: Attribution) -> dict[str, float]:
+def _component_measures(
+    attribution: Attribution, on_demand_rules: Iterable[str]
+) -> dict[str, float]:
     """Sum each component's measures over the steps, keeping only the non-zero ones.
 
     A component that did not run, or never failed or waited, publishes nothing: a dashboard
     sums a missing point as zero, and the per-session score count stays bounded by what ran.
+    The one exception is an on-demand rule's reads, always published so that an unused rule
+    shows up on the dashboard.
     """
-    totals: Counter = Counter()
+    totals: Counter = Counter({f"rule_{name}_reads": 0 for name in on_demand_rules})
     for prefix, table, measures in COMPONENT_SCORES:
         for (_step, name), stats in getattr(attribution, table).items():
             for measure in measures:
                 totals[f"{prefix}_{name}_{measure}"] += stats[measure]
     for name, reads in attribution.rules.items():
         totals[f"rule_{name}_reads"] += reads
-    return {name: value for name, value in totals.items() if value}
+    return {name: v for name, v in totals.items() if v or name.startswith("rule_")}
 
 
-def build_scores(rep: SessionReport) -> list[dict]:
-    """Build a session's Langfuse scores; ids are deterministic, so a re-run upserts."""
+def build_scores(rep: SessionReport, *, on_demand_rules: Iterable[str] = ()) -> list[dict]:
+    """Build a session's Langfuse scores; ids are deterministic, so a re-run upserts.
+
+    `on_demand_rules` names every on-demand rule, each scored `rule_<name>_reads` even at 0.
+    """
     acct = rep.accounting
     numeric = {
         "cost_usd_total": acct.cost_usd,
@@ -231,7 +249,7 @@ def build_scores(rep: SessionReport) -> list[dict]:
     for step, slot in acct.steps.items():
         numeric[f"step_{step}_cost_usd"] = slot.cost_usd
         numeric[f"step_{step}_active_s"] = slot.active_s
-    numeric |= _component_measures(rep.attribution)
+    numeric |= _component_measures(rep.attribution, on_demand_rules)
     scores = [_score(rep, n, round(float(v), 6), "NUMERIC") for n, v in numeric.items()]
     scores.append(_score(rep, "landed", int(rep.landed), "BOOLEAN"))
     for name in ("review_tdd_followed", "review_tests_weakened"):

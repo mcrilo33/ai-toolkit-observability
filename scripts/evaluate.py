@@ -442,6 +442,7 @@ def main(argv: list[str] | None = None, *, http=None, run=None) -> int:
         raw = load_raw(args.raw_dir, {o["sessionId"] for o in observations if o.get("sessionId")})
         selected, skipped = _select_sessions(args, observations, raw, repos)
         reports = _analyse_selected(selected, observations, raw, repos, run)
+        rule_names = sorted(p.stem for p in args.rules_dir.glob("*.md"))
         agg = aggregate(
             reports,
             unused_rules=list_unused_rules(
@@ -455,7 +456,15 @@ def main(argv: list[str] | None = None, *, http=None, run=None) -> int:
             else render_report(reports, agg, skipped)
         )
         if not args.no_publish:
-            publish_scores(http, [s for r in reports if r.issue for s in build_scores(r)])
+            publish_scores(
+                http,
+                [
+                    s
+                    for r in reports
+                    if r.issue
+                    for s in build_scores(r, on_demand_rules=rule_names)
+                ],
+            )
     except EvalError as e:
         print(f"evaluate.py: error: {e}", file=sys.stderr)
         return 2

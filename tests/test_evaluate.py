@@ -105,6 +105,16 @@ def test_find_issue_follows_the_join_chain(vcs, paths, forced, expected, tool_in
         tool_input
     )
 
+    assert ev.find_issue(observations, raw, "ai-toolkit-observability", forced) == expected
+
+
+def test_find_issue_ignores_a_session_of_another_repo():
+    observations = [make_obs("tool:Bash", 1, 2, full_command="/w/workspaces/ai-toolkit/2-feat-x/a")]
+    observations[0]["metadata"]["repo"] = "ai-toolkit"
+    branch = {"name": "claude_code.tool_result", "attrs": {"vcs.ref.head.name": "2-feat-x"}}
+
+    assert ev.find_issue(observations, [branch], "ai-toolkit-observability", None) is None
+
 
 def test_find_issue_ignores_a_raw_only_session_of_another_repo():
     raw = [
@@ -138,16 +148,6 @@ def test_toolkit_version_falls_back_to_the_raw_attribute_and_checks_it_is_a_revi
     ]
 
     assert ev.toolkit_version([], raw) == expected
-
-    assert ev.find_issue(observations, raw, "ai-toolkit-observability", forced) == expected
-
-
-def test_find_issue_ignores_a_session_of_another_repo():
-    observations = [make_obs("tool:Bash", 1, 2, full_command="/w/workspaces/ai-toolkit/2-feat-x/a")]
-    observations[0]["metadata"]["repo"] = "ai-toolkit"
-    branch = {"name": "claude_code.tool_result", "attrs": {"vcs.ref.head.name": "2-feat-x"}}
-
-    assert ev.find_issue(observations, [branch], "ai-toolkit-observability", None) is None
 
 
 def test_parse_lifecycle_reads_waits_gate_and_landing_from_comments():
@@ -1021,16 +1021,17 @@ def test_sessions_table_orders_rows_by_start_time_and_picks_the_costliest_step()
         review_rounds=2,
         redispatches=1,
         top_step="review",
+        raw_only=False,
     )
     assert rows[0]["landed"] is False and rows[0]["top_step"] == "implement"
     text = ev.render_report([early, late], agg)
     table = text.split("Sessions\n")[1].split("\n\n")[0].splitlines()
     assert table[0].split() == [
         "repo", "issue", "gate_lane", "landed", "cost_usd", "active_min", "waiting_min",
-        "review_rounds", "redispatches", "top_step",
+        "review_rounds", "redispatches", "top_step", "raw_only",
     ]  # fmt: skip
     assert table[1].split()[:4] == ["ai-toolkit-observability", "#1", "plan", "false"]
-    assert table[2].split()[1:] == ["#2", "plan", "true", "4.00", "2.0", "0.5", "2", "1", "review"]
+    assert table[2].split()[1:] == ["#2", "plan", "true", "4.00", "2.0", "0.5", "2", "1", "review", "false"]
 
 
 def test_sessions_table_keeps_a_raw_only_session_with_dashes_for_what_is_missing():
@@ -1042,7 +1043,7 @@ def test_sessions_table_keeps_a_raw_only_session_with_dashes_for_what_is_missing
     assert rows[0]["issue"] is None and rows[0]["gate_lane"] is None
     assert rows[0]["top_step"] is None and rows[0]["cost_usd"] == 0.0
     line = ev.render_report([bare], agg).split("Sessions\n")[1].splitlines()[1].split()
-    assert line[1:4] == ["—", "unknown", "false"] and line[-1] == "—"
+    assert line[1:4] == ["—", "unknown", "false"] and line[-2:] == ["—", "false"]
 
 
 def raw_line(session, name, attrs, offset):
@@ -1457,7 +1458,7 @@ def add_raw_only_session(world, repo="ai-toolkit", start=400):
         ("api_request", {**review, "duration_ms": "10000"}, start + 40),
         (
             "tool_result",
-            {"tool_use_id": "t1", "tool_name": "Bash", "duration_ms": "500"},
+            {"tool_use_id": "t1", "tool_name": "Bash", "tool_input": '{"command": "ls"}', "duration_ms": "500"},
             start + 5,
         ),
         (
@@ -1514,7 +1515,7 @@ def test_main_scores_a_raw_only_session_next_to_a_langfuse_one(tmp_path, capsys)
         and mine["agent_main_calls"]["value"] == 1
     )
     assert (
-        mine["tool_Bash_calls"]["value"] == 1
+        mine["tool_bash-read_calls"]["value"] == 1
         and mine["hook_PreToolUse:Bash_runs"]["value"] == 1
     )
     assert not [

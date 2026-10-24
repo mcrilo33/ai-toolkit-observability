@@ -223,7 +223,7 @@ def load_issue(run, number: int) -> dict:
 # --------------------------------------------------------------------------- rules at a commit
 
 
-def toolkit_version(observations: list[dict], raw: list[dict] = ()) -> str | None:
+def toolkit_version(observations: list[dict], raw: list[dict] | tuple = ()) -> str | None:
     """Return the toolkit commit of a session (first non-empty `toolkit_version`, `-dirty` cut).
 
     The value comes from span metadata, else from the raw records, and ends up in a git
@@ -306,25 +306,25 @@ RAW_ONLY_NOTE = (
 
 def _describe_sources(observations: list[dict], raw: list[dict], leaves: list) -> list[str]:
     """Say which parts of the session Langfuse or the raw JSONL could not provide."""
-    notes = []
-    filled = partial = None
+    lower_bound = (
+        "review_rounds and redispatches are lower bounds: they count only the spans and "
+        "sessions that Langfuse or the raw JSONL still have"
+    )
     if raw and not observations:
-        notes.append(RAW_ONLY_NOTE)
-    else:
-        if not raw:
-            notes.append(
-                "raw JSONL missing for this session (rotated away?): hooks and the branch "
-                "name are unavailable; cost, tools, agents and rules come from Langfuse"
-            )
-        if filled := [lf for lf in leaves if lf.source == "raw"]:
-            notes.append(_describe_gap_fill(filled))
-        if partial := _describe_partial_raw(raw, leaves):
-            notes.append(partial)
-    if notes and (not observations or not raw or filled or partial):
+        return [RAW_ONLY_NOTE, lower_bound]
+    notes = []
+    if not raw:
         notes.append(
-            "review_rounds and redispatches are lower bounds: they count only the spans and "
-            "sessions that Langfuse or the raw JSONL still have"
+            "raw JSONL missing for this session (rotated away?): hooks and the branch "
+            "name are unavailable; cost, tools, agents and rules come from Langfuse"
         )
+    filled = [lf for lf in leaves if lf.source == "raw"]
+    if filled:
+        notes.append(_describe_gap_fill(filled))
+    if partial := _describe_partial_raw(raw, leaves):
+        notes.append(partial)
+    if not raw or filled or partial:
+        notes.append(lower_bound)
     return notes
 
 

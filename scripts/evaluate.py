@@ -164,19 +164,20 @@ def fetch_observations(http) -> list[dict]:
 SPOKE_ID = re.compile(r'"spoke_run_id"\s*,\s*"value"\s*:\s*\{\s*"stringValue"\s*:\s*"([^"]+)"')
 
 
-def load_raw(raw_dir: Path, wanted: set[str]) -> dict[str, list[dict]]:
+def load_raw(raw_dir: Path, wanted: set[str] | None) -> dict[str, list[dict]]:
     """Read hook, tool and request records of `wanted` sessions from every collector file.
 
     A line may batch several resources (sessions); each resource names its own session.
+    `wanted=None` reads every session, including those Langfuse never received.
     """
     out: dict[str, list[dict]] = defaultdict(list)
     for path in sorted(raw_dir.glob("logs*.jsonl")):
         with path.open(errors="replace") as lines:
             for line in lines:
-                if wanted.isdisjoint(SPOKE_ID.findall(line)):
+                if wanted is not None and wanted.isdisjoint(SPOKE_ID.findall(line)):
                     continue
                 for session, record in _parse_raw_line(line):
-                    if session in wanted:
+                    if wanted is None or session in wanted:
                         out[session].append(record)
     return out
 
@@ -222,14 +223,16 @@ def load_issue(run, number: int) -> dict:
 # --------------------------------------------------------------------------- rules at a commit
 
 
-def toolkit_version(observations: list[dict]) -> str | None:
+def toolkit_version(observations: list[dict], raw: list[dict] = ()) -> str | None:
     """Return the toolkit commit of a session (first non-empty `toolkit_version`, `-dirty` cut).
 
-    The value comes from span metadata and ends up in a git argument, so only a hex revision
-    is accepted.
+    The value comes from span metadata, else from the raw records, and ends up in a git
+    argument, so only a hex revision is accepted.
     """
-    for o in observations:
-        if version := o["metadata"].get("attributes.toolkit_version"):
+    versions = [o["metadata"].get("attributes.toolkit_version") for o in observations]
+    versions += [rec["attrs"].get("toolkit_version") for rec in raw]
+    for version in versions:
+        if version:
             sha = version.removesuffix("-dirty")
             return sha if re.fullmatch(r"[0-9a-f]{6,40}", sha) else None
     return None
@@ -274,7 +277,8 @@ def _describe_gap_fill(filled: list) -> str:
         f"gap-filled from the raw JSONL (Langfuse had no span for them): {len(llm)} LLM "
         f"request(s) costing {sum(lf.cost for lf in llm):.2f} USD and {len(filled) - len(llm)} "
         f"tool call(s), {clock(min(lf.start for lf in filled))} to "
-        f"{clock(max(lf.end for lf in filled))} UTC; they have no sub-agent attribution"
+        f"{clock(max(lf.end for lf in filled))} UTC; their sub-agent is known only where the "
+        "raw records name it"
     )
 
 
@@ -294,36 +298,53 @@ def _describe_partial_raw(raw: list[dict], leaves: list) -> str | None:
     )
 
 
+RAW_ONLY_NOTE = (
+    "no Langfuse span: analysed from the raw JSONL alone; waiting_s is a lower bound (no "
+    "blocked-on-user spans); tool long waits and rule_<name>_cost_usd are not computed"
+)
+
+
+def _describe_sources(observations: list[dict], raw: list[dict], leaves: list) -> list[str]:
+    """Say which parts of the session Langfuse or the raw JSONL could not provide."""
+    notes = []
+    filled = partial = None
+    if raw and not observations:
+        notes.append(RAW_ONLY_NOTE)
+    else:
+        if not raw:
+            notes.append(
+                "raw JSONL missing for this session (rotated away?): hooks and the branch "
+                "name are unavailable; cost, tools, agents and rules come from Langfuse"
+            )
+        if filled := [lf for lf in leaves if lf.source == "raw"]:
+            notes.append(_describe_gap_fill(filled))
+        if partial := _describe_partial_raw(raw, leaves):
+            notes.append(partial)
+    if notes and (not observations or not raw or filled or partial):
+        notes.append(
+            "review_rounds and redispatches are lower bounds: they count only the spans and "
+            "sessions that Langfuse or the raw JSONL still have"
+        )
+    return notes
+
+
 def analyse_session(
     session, repo, observations, raw, issue, commits, run, *, load_rules=None
 ) -> SessionReport:
     """Build the report of one session from its observations, raw records, issue and commits.
 
     `run` must already be scoped to the session's repo (see `_scoped`). `load_rules` is a
-    `make_rule_loader` result; without it no rule cost is computed.
+    `make_rule_loader` result; without it no rule cost is computed. A session with raw records
+    and no observation is `raw_only`: it is analysed from the raw JSONL alone.
     """
     leaves = build_leaves(observations, raw)
-    always_on, on_demand = load_rules(toolkit_version(observations)) if load_rules else ([], [])
+    version = toolkit_version(observations, raw)
+    always_on, on_demand = load_rules(version) if load_rules else ([], [])
     life = parse_lifecycle(issue["comments"]) if issue else Lifecycle()
     stepper = Stepper(leaves, life, commits)
     counts = count_dispatches(observations, raw, life)
     footer = re.search(r"(?m)^Gate:\s*(\S+)", issue["body"]) if issue else None
-    notes = []
-    if not raw:
-        notes.append(
-            "raw JSONL missing for this session (rotated away?): hooks and the branch "
-            "name are unavailable; cost, tools, agents and rules come from Langfuse"
-        )
-    filled = [lf for lf in leaves if lf.source == "raw"]
-    if filled:
-        notes.append(_describe_gap_fill(filled))
-    if partial := _describe_partial_raw(raw, leaves):
-        notes.append(partial)
-    if not raw or filled or partial:
-        notes.append(
-            "review_rounds and redispatches are lower bounds: they count only the spans and "
-            "sessions that Langfuse or the raw JSONL still have"
-        )
+    notes = _describe_sources(observations, raw, leaves)
     if issue and not life.gate_answered_at:
         notes.append("no gate-answer comment: the plan step is empty")
     in_telemetry = max(count_claude_sessions(observations, raw) - 1, 0)
@@ -337,10 +358,12 @@ def analyse_session(
     span = (min(lf.start for lf in leaves), max(lf.end for lf in leaves)) if leaves else None
     judged = judged_reviews(life, *span) if span else []
     named = any(o["metadata"].get("repo") == repo for o in observations)
+    named |= any(rec["attrs"].get("repo") == repo for rec in raw)
     return SessionReport(
         session=session,
         repo=repo,
         environment=repo if named else None,
+        raw_only=bool(raw) and not observations,
         issue=issue["number"] if issue else None,
         title=issue["title"] if issue else "",
         gate_lane=footer[1] if footer else None,
@@ -434,26 +457,47 @@ def _scoped(run, ref: RepoRef):
     return scoped
 
 
+def _session_starts(args, observations, raw):
+    """Map each wanted session to (start, repo names, observations).
+
+    A session with spans starts at its first span and names the repos of its spans; one that
+    exists only in the raw JSONL (Langfuse never received it) starts at its first raw record
+    and names the `repo` attribute of its records.
+    """
+    by_session = defaultdict(list)
+    for o in observations:
+        if o.get("sessionId") and (not args.session or o["sessionId"] in args.session):
+            by_session[o["sessionId"]].append(o)
+    starts = {
+        session: (
+            min(parse_time(o["startTime"]) for o in obs),
+            {o["metadata"].get("repo") for o in obs} - {None},
+            obs,
+        )
+        for session, obs in by_session.items()
+    }
+    for session, records in raw.items():
+        if session not in starts and (not args.session or session in args.session):
+            names = {rec["attrs"].get("repo") for rec in records} - {None, ""}
+            starts[session] = (min(rec["t"] for rec in records), names, [])
+    return starts
+
+
 def _select_sessions(args, observations, raw, repos):
     """Return (sessions to score, sessions skipped).
 
     The first maps each wanted session to (repo name, issue number or None); the second maps
     each in-window session of no mapped repo to its repo name(s). The window and the repo check
-    pick whole sessions by their first span; an explicit `--session` bypasses both and, with no
-    mapped repo of its own, joins in the first (the current directory's) repo. A session is
-    always scored from all of its spans.
+    pick whole sessions by their first span (first raw record for a session Langfuse never
+    received); an explicit `--session` bypasses both and, with no mapped repo of its own, joins
+    in the first (the current directory's) repo. A session is always scored from all of its
+    spans.
     """
     since, until = _to_epoch("--since", args.since), _to_epoch("--until", args.until)
-    by_session = defaultdict(list)
-    for o in observations:
-        if o.get("sessionId") and (not args.session or o["sessionId"] in args.session):
-            by_session[o["sessionId"]].append(o)
     forced = args.issue[0] if args.session and args.issue and len(args.issue) == 1 else None
     selected, skipped = {}, {}
-    for session, obs in by_session.items():
-        started = min(parse_time(o["startTime"]) for o in obs)
+    for session, (started, names, obs) in _session_starts(args, observations, raw).items():
         in_window = (since is None or started >= since) and (until is None or started <= until)
-        names = {o["metadata"].get("repo") for o in obs} - {None}
         mapped = sorted(names & repos.keys())
         if not (args.session or in_window):
             continue
@@ -497,7 +541,7 @@ def main(argv: list[str] | None = None, *, http=None, run=None) -> int:
         repos = {here["name"]: RepoRef(here["nameWithOwner"], Path("."))} | repos
         http = http or make_http(args.url, *load_credentials(run))
         observations = fetch_observations(http)
-        raw = load_raw(args.raw_dir, {o["sessionId"] for o in observations if o.get("sessionId")})
+        raw = load_raw(args.raw_dir, None)
         selected, skipped = _select_sessions(args, observations, raw, repos)
         toolkit = _scoped(run, repos["ai-toolkit"]) if "ai-toolkit" in repos else None
         load_rules = make_rule_loader(args.always_on_dir, args.rules_dir, toolkit)

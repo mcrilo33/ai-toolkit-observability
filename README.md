@@ -78,6 +78,31 @@ final `skipped:` line (and under `skipped` in `--json`), never dropped silently 
 `--issue`, which lists no skipped sessions: their issue is unknown). The
 Sessions table has a `repo` column.
 
+### Sessions Langfuse never received
+
+A session that has records in the raw JSONL but no Langfuse span at all (the collector's
+export was rejected, as happened from 2026-10-21 to 2026-10-24) is still scored. It starts
+at its first raw record, its repo is the `repo` attribute of its records, and it then goes
+through the same window, `--session`, `--issue` and unmapped-repo rules. Its `environment`
+is that `repo`, its toolkit version the raw `toolkit_version` attribute, and its score ids
+are the same `sha1(session:name)` a Langfuse-backed run would write, so a later run upserts
+them. The report marks it `(raw only)` in the session header, in the `raw_only` column and
+in `--json`, with a note. These scores are not computed, because they need spans, and are
+never sent as 0: `tool_<name>_long_waits` and `tool_<name>_long_wait_s` (they need
+`blocked_on_user` spans) and `rule_<name>_cost_usd` (the raw records give only a call's
+total cost, no input cost). `waiting_s` is a lower bound for the same reason: only the
+coordinator's gate and permission comments count. Sub-agent attribution (`agent_<name>_*`
+and the review step) comes from the `agent.name` of the raw requests; a raw tool call is
+attributed to its sub-agent only when its `agent_id` matches one of those requests.
+
+To backfill a gap from a backup of the raw files (`--raw-dir` reads every `logs*.jsonl` in it):
+
+```sh
+scripts/evaluate.py --raw-dir ~/.ai-toolkit/otel-raw-backup --since 2026-10-21T17:00 --until 2026-10-24T07:00 --repo ai-toolkit=mcrilo33/ai-toolkit=~/Repos/ai-toolkit
+```
+
+Add a `--repo NAME=OWNER/REPO=PATH` for every other repo whose gap sessions should be scored.
+
 Keys come from the Keychain (`ai-toolkit-langfuse-LANGFUSE_INIT_PROJECT_{PUBLIC,SECRET}_KEY`)
 at runtime and travel only in an `Authorization` header. If the stack is down the run stops
 before any score is written. Everything is read and computed first; scores are written last,
@@ -203,12 +228,13 @@ carrying `#<n>` (`test`, `feat`/`fix`, `refactor`; anything else is `other`).
 ### Known limits
 
 - Langfuse has no span from before the collector exported to it. Those spans are filled from
-  the raw JSONL, which has no sub-agent attribution, and the report lists them. When the raw
-  file has rotated away too, the session keeps its trace-level numbers and says what is missing.
+  the raw JSONL, whose sub-agent is known only where a request names it, and the report lists
+  them. When the raw file has rotated away too, the session keeps its trace-level numbers and
+  says what is missing.
 - `review_rounds` and `redispatches` are lower bounds whenever Langfuse or the raw JSONL lacks part of the session; the report says so in a note.
 - `vcs.ref.head.name` is on a handful of events, so the issue join leans on the worktree path;
   a session that never touched it needs `--issue`.
-- `--since`/`--until` pick whole sessions by their first span; a session is always scored from all its spans.
+- `--since`/`--until` pick whole sessions by their first span (first raw record for a session Langfuse never received); a session is always scored from all its spans.
 - Review time is the review agent's own spans; the main thread's work around them stays in its step.
 - A permission request nobody answered is a wait only when a `blocked_on_user` span confirms it.
 - A re-dispatch is the same spoke with a new Claude session; the gap before it is `other`.

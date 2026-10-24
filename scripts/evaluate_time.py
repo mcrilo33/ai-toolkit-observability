@@ -87,6 +87,13 @@ def _leaf_kind(obs: dict) -> str | None:
 
 def _leaves_from_raw(raw_records: list[dict], seen: set[str]) -> list[Leaf]:
     """Build leaves from raw api_request/tool_result events whose id Langfuse never received."""
+    agent_of = {
+        a["agent_id"]: a["agent.name"]
+        for rec in raw_records
+        if rec["name"] == "claude_code.api_request"
+        and (a := rec["attrs"]).get("agent_id")
+        and a.get("agent.name")
+    }
     leaves = []
     for rec in raw_records:
         a, ended = rec["attrs"], rec["t"]
@@ -106,6 +113,7 @@ def _leaves_from_raw(raw_records: list[dict], seen: set[str]) -> list[Leaf]:
                         for k in ("input_tokens", "cache_read_tokens", "cache_creation_tokens")
                     ),
                     claude=a.get("session.id", ""),
+                    agent=a.get("agent.name") or None,
                     source="raw",
                 )
             )
@@ -118,6 +126,7 @@ def _leaves_from_raw(raw_records: list[dict], seen: set[str]) -> list[Leaf]:
                     started,
                     ended,
                     claude=a.get("session.id", ""),
+                    agent=agent_of.get(a.get("agent_id", "")),
                     command=str(tool_input.get("command", "")),
                     file_path=str(tool_input.get("file_path", "")),
                     failed=a.get("success") == "false",
@@ -139,7 +148,8 @@ def build_leaves(observations: list[dict], raw_records: list[dict] = ()) -> list
     """Turn Langfuse observations into leaves, marking failed tools and their blocked time.
 
     Spans only the raw JSONL has (Langfuse was not receiving yet, or dropped them) are added
-    as `source="raw"` leaves; they carry no sub-agent attribution.
+    as `source="raw"` leaves; their sub-agent is the raw `agent.name` of the request, or of the
+    request that has the tool result's `agent_id` (a tool call with no such request stays main).
     """
     by_id = {o["id"]: o for o in observations}
     failed = {o["parentObservationId"] for o in observations if o["level"] == "ERROR"}
@@ -219,11 +229,14 @@ def find_issue(observations, raw_records, repo, forced=None) -> int | None:
 
     Order: the explicit override, then `vcs.ref.head.name` in the raw JSONL, then the
     `<n>-<slug>` worktree directory in tool commands and file paths (Langfuse or raw). The
-    `repo` resource attribute must match, so a session of another project is never joined.
+    `repo` attribute (span metadata or raw record) must match, so a session of another project
+    is never joined.
     """
     if forced is not None:
         return forced
-    repos = {o["metadata"].get("repo") for o in observations} - {None}
+    repos = {o["metadata"].get("repo") for o in observations}
+    repos |= {rec["attrs"].get("repo") for rec in raw_records}
+    repos -= {None, ""}
     if repos and repo not in repos:
         return None
     votes = Counter()

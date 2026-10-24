@@ -273,6 +273,7 @@ class SessionReport:
     notes: list[str] = field(default_factory=list)
     started: float = 0.0
     environment: str | None = None  # the repo named by the session's own spans; None if unnamed
+    raw_only: bool = False  # no Langfuse span: analysed from the raw JSONL alone
 
 
 def _score(rep: SessionReport, name: str, value, data_type: str) -> dict:
@@ -430,6 +431,7 @@ def _session_row(rep: SessionReport) -> dict:
         "review_rounds": rep.review_rounds,
         "redispatches": rep.redispatches,
         "top_step": top if top and acct.steps[top].cost_usd > 0 else None,
+        "raw_only": rep.raw_only,
     }
 
 
@@ -482,7 +484,7 @@ def render_session(rep: SessionReport) -> str:
     """Render one session's breakdown as text."""
     acct, issue = rep.accounting, f"#{rep.issue}" if rep.issue else "unknown issue"
     lines = [
-        f"== {issue} {rep.title} (session {rep.session}) ==",
+        f"== {issue} {rep.title} (session {rep.session}){' (raw only)' * rep.raw_only} ==",
         f"landed={str(rep.landed).lower()} review_rounds={rep.review_rounds}"
         f" redispatches={rep.redispatches} blocked_comments={rep.blocked_comments}"
         f" gate_lane={rep.gate_lane or 'unknown'}",
@@ -514,6 +516,7 @@ def render_aggregates(agg: dict) -> str:
             "review_rounds",
             "redispatches",
             "top_step",
+            "raw_only",
         ],
         [
             [
@@ -527,6 +530,7 @@ def render_aggregates(agg: dict) -> str:
                 r["review_rounds"],
                 r["redispatches"],
                 r["top_step"] or "—",
+                str(r["raw_only"]).lower(),
             ]
             for r in agg["sessions"]
         ],

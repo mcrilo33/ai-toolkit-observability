@@ -1,4 +1,5 @@
 import datetime as dt
+import hashlib
 import itertools
 import json
 import subprocess
@@ -103,6 +104,40 @@ def test_find_issue_follows_the_join_chain(vcs, paths, forced, expected, tool_in
     raw += [{"name": "claude_code.tool_result", "attrs": {"tool_input": tool_input}}] * bool(
         tool_input
     )
+
+
+def test_find_issue_ignores_a_raw_only_session_of_another_repo():
+    raw = [
+        {
+            "name": "claude_code.tool_result",
+            "attrs": {"repo": "ai-toolkit", "vcs.ref.head.name": "2-x"},
+        }
+    ]
+
+    assert ev.find_issue([], raw, "ai-toolkit-observability", None) is None
+    assert ev.find_issue([], raw, "ai-toolkit", None) == 2
+
+
+@pytest.mark.parametrize(
+    "attr,expected",
+    [
+        ("abc1234", "abc1234"),
+        ("abc1234-dirty", "abc1234"),
+        ("--output=x", None),
+        (None, None),
+    ],
+)
+def test_toolkit_version_falls_back_to_the_raw_attribute_and_checks_it_is_a_revision(
+    attr, expected
+):
+    raw = [
+        {
+            "name": "claude_code.api_request",
+            "attrs": {"toolkit_version": attr} if attr else {},
+        }
+    ]
+
+    assert ev.toolkit_version([], raw) == expected
 
     assert ev.find_issue(observations, raw, "ai-toolkit-observability", forced) == expected
 
@@ -334,15 +369,15 @@ def test_build_leaves_keeps_the_cost_of_a_generation_without_an_end_time():
     assert (leaf.cost, leaf.end - leaf.start) == (0.3, 0)
 
 
-def raw_api_request(offset, request_id, cost, duration_ms):
+def raw_api_request(offset, request_id, cost, duration_ms, **extra):
     attrs = {"request_id": request_id, "cost_usd": cost, "duration_ms": str(duration_ms)}
-    attrs |= {"input_tokens": "100", "output_tokens": "10", "session.id": CLAUDE_A}
+    attrs |= {"input_tokens": "100", "output_tokens": "10", "session.id": CLAUDE_A} | extra
     return {"t": T0 + offset, "name": "claude_code.api_request", "attrs": attrs}
 
 
-def raw_tool_result(offset, tool_use_id, tool, tool_input="{}", duration_ms=4):
+def raw_tool_result(offset, tool_use_id, tool, tool_input="{}", duration_ms=4, **extra):
     attrs = {"tool_use_id": tool_use_id, "tool_name": tool, "tool_input": tool_input}
-    attrs |= {"duration_ms": str(duration_ms), "success": "true", "session.id": CLAUDE_A}
+    attrs |= {"duration_ms": str(duration_ms), "success": "true", "session.id": CLAUDE_A} | extra
     return {"t": T0 + offset, "name": "claude_code.tool_result", "attrs": attrs}
 
 
@@ -370,6 +405,32 @@ def test_build_leaves_fills_spans_langfuse_never_received_from_raw_without_dupli
     (langfuse_llm,) = [lf for lf in leaves if lf.kind == "llm" and lf.source == "langfuse"]
     assert (langfuse_llm.input_tokens, langfuse_llm.input_cost) == (118368, 0.0240876)
     assert filled["Read"].file_path.endswith("rules/workflow.md")
+
+
+def test_build_leaves_names_the_sub_agent_of_raw_requests_and_their_tool_results():
+    raw = [
+        raw_api_request(10, "req_main", 0.1, 1000),
+        raw_api_request(
+            20,
+            "req_review",
+            0.2,
+            1000,
+            **{"agent.name": "code-review", "agent_id": "a1"},
+        ),
+        raw_tool_result(21, "toolu_review", "Read", agent_id="a1"),
+        raw_tool_result(22, "toolu_main", "Read"),
+        raw_tool_result(23, "toolu_unknown", "Read", agent_id="a-never-requested"),
+    ]
+
+    leaves = ev.build_leaves([], raw)
+
+    assert [lf.agent for lf in leaves] == [
+        None,
+        "code-review",
+        "code-review",
+        None,
+        None,
+    ]
 
 
 def run_attribution(leaves, raw, comments=(), commits=()):
@@ -1024,7 +1085,11 @@ def test_load_raw_reads_rotated_files_and_keeps_only_wanted_sessions(tmp_path):
     (tmp_path / "logs-batched.jsonl").write_text(json.dumps(batch) + "\n")
 
     raw = ev.load_raw(tmp_path, {SPOKE})
+    everything = ev.load_raw(tmp_path, None)
 
+    assert (
+        set(everything) == {SPOKE, "other-session"} and everything[SPOKE] == raw[SPOKE]
+    )
     assert sorted(r["name"] for r in raw[SPOKE]) == [
         "claude_code.api_request",
         "claude_code.api_request",
@@ -1369,6 +1434,131 @@ def test_main_json_lists_skipped_sessions_inside_the_window_only(tmp_path, capsy
     assert world.main("--json", *window) == 0
 
     assert json.loads(capsys.readouterr().out)["skipped"] == skipped
+
+
+RAW_ONLY = "99999999-aaaa-bbbb-cccc-000000000000"
+
+
+def add_raw_only_session(world, repo="ai-toolkit", start=400):
+    """A session the collector logged but Langfuse never received: raw records only."""
+    common = {
+        "repo": repo,
+        "vcs.ref.head.name": "1-feat-x",
+        "toolkit_version": "abc1234",
+    }
+    common |= {"session.id": CLAUDE_B}
+    review = {"agent.name": "code-review", "request_id": "r2", "cost_usd": "0.2"}
+    lines = [
+        (
+            "api_request",
+            {"request_id": "r1", "cost_usd": "0.3", "duration_ms": "20000"},
+            start,
+        ),
+        ("api_request", {**review, "duration_ms": "10000"}, start + 40),
+        (
+            "tool_result",
+            {"tool_use_id": "t1", "tool_name": "Bash", "duration_ms": "500"},
+            start + 5,
+        ),
+        (
+            "hook_execution_complete",
+            {"hook_name": "PreToolUse:Bash", "total_duration_ms": "40"},
+            start + 6,
+        ),
+    ]
+    with (world.raw_dir / "logs-gap.jsonl").open("a") as f:
+        for name, attrs, offset in lines:
+            line = raw_line(RAW_ONLY, f"claude_code.{name}", common | attrs, offset)
+            f.write(line + "\n")
+    world.issue_of[f"owner/{repo}"] = world.issue
+
+
+def test_main_scores_a_raw_only_session_next_to_a_langfuse_one(tmp_path, capsys):
+    world = World(tmp_path)
+    add_raw_only_session(world)
+    checkout = tmp_path / "tk"
+    checkout.mkdir()
+    repo = f"--repo=ai-toolkit=owner/ai-toolkit={checkout}"
+
+    assert world.main(repo) == 0
+    assert "(raw only)" in capsys.readouterr().out
+    assert world.main(repo, "--json") == 0
+
+    report = json.loads(capsys.readouterr().out)
+    sessions = {s["session"]: s for s in report["sessions"]}
+    assert (
+        sessions[SPOKE]["raw_only"] is False and sessions[RAW_ONLY]["raw_only"] is True
+    )
+    notes = sessions[RAW_ONLY]["notes"]
+    assert any(
+        "no Langfuse span: analysed from the raw JSONL alone" in n for n in notes
+    )
+    assert any("lower bound" in n for n in notes)
+    assert not any("gap-filled" in n or "raw JSONL covers only" in n for n in notes)
+    posted = {c[2]["name"]: c[2] for c in world.http_calls if c[0] == "POST"}
+    mine = {
+        c[2]["name"]: c[2]
+        for c in world.http_calls
+        if c[0] == "POST" and c[2]["sessionId"] == RAW_ONLY
+    }
+    assert {s["environment"] for s in mine.values()} == {"ai-toolkit"}
+    assert all(
+        s["id"] == hashlib.sha1(f"ai-toolkit-eval:{RAW_ONLY}:{n}".encode()).hexdigest()
+        for n, s in mine.items()
+    )
+    assert mine["cost_usd_total"]["value"] == pytest.approx(0.5)
+    assert mine["step_review_cost_usd"]["value"] == pytest.approx(0.2)
+    assert mine["step_review_active_s"]["value"] == pytest.approx(10)
+    assert (
+        mine["agent_code-review_calls"]["value"] == 1
+        and mine["agent_main_calls"]["value"] == 1
+    )
+    assert (
+        mine["tool_Bash_calls"]["value"] == 1
+        and mine["hook_PreToolUse:Bash_runs"]["value"] == 1
+    )
+    assert not [
+        n
+        for n in mine
+        if "long_wait" in n or n.endswith("_cost_usd") and n.startswith("rule_")
+    ]
+    assert len(posted) > 0 and sessions[RAW_ONLY]["issue"] == 1
+
+
+@pytest.mark.parametrize(
+    "window,repo,scored,skipped",
+    [
+        pytest.param(
+            ["--until", "2026-10-06T14:53:00Z"],
+            "ai-toolkit",
+            False,
+            [],
+            id="before-since",
+        ),
+        pytest.param(
+            ["--since", "2026-10-06T14:57:00Z"], "ai-toolkit", True, [], id="in-window"
+        ),
+        pytest.param(
+            [], "some-other-repo", False, ["some-other-repo"], id="unmapped-repo"
+        ),
+    ],
+)
+def test_main_selects_raw_only_sessions_by_first_raw_record_and_mapped_repo(
+    tmp_path, capsys, window, repo, scored, skipped
+):
+    world = World(tmp_path)
+    add_raw_only_session(world, repo)
+    checkout = tmp_path / "tk"
+    checkout.mkdir()
+
+    assert (
+        world.main(f"--repo=ai-toolkit=owner/ai-toolkit={checkout}", "--json", *window)
+        == 0
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert (RAW_ONLY in {s["session"] for s in report["sessions"]}) is scored
+    assert [r["repo"] for r in report["skipped"] if r["session"] == RAW_ONLY] == skipped
 
 
 def test_main_turns_a_failing_gh_into_a_clear_error_and_posts_nothing(tmp_path, capsys):

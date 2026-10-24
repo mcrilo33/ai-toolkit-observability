@@ -1476,6 +1476,7 @@ def add_raw_only_session(world, repo="ai-toolkit", start=400):
 
 def test_main_scores_a_raw_only_session_next_to_a_langfuse_one(tmp_path, capsys):
     world = World(tmp_path)
+    world.observations[1] |= {"inputUsage": 1000, "inputCost": 0.01}  # a priced Langfuse call
     add_raw_only_session(world)
     checkout = tmp_path / "tk"
     checkout.mkdir()
@@ -1496,7 +1497,6 @@ def test_main_scores_a_raw_only_session_next_to_a_langfuse_one(tmp_path, capsys)
     )
     assert any("lower bound" in n for n in notes)
     assert not any("gap-filled" in n or "raw JSONL covers only" in n for n in notes)
-    posted = {c[2]["name"]: c[2] for c in world.http_calls if c[0] == "POST"}
     mine = {
         c[2]["name"]: c[2]
         for c in world.http_calls
@@ -1523,7 +1523,9 @@ def test_main_scores_a_raw_only_session_next_to_a_langfuse_one(tmp_path, capsys)
         for n in mine
         if "long_wait" in n or n.endswith("_cost_usd") and n.startswith("rule_")
     ]
-    assert len(posted) > 0 and sessions[RAW_ONLY]["issue"] == 1
+    assert sessions[RAW_ONLY]["issue"] == 1
+    langfuse_scores = {c[2]["name"] for c in world.http_calls if c[0] == "POST" and c[2]["sessionId"] == SPOKE}
+    assert "rule_guidelines_cost_usd" in langfuse_scores  # the same run does price a rule
 
 
 @pytest.mark.parametrize(
@@ -1534,8 +1536,12 @@ def test_main_scores_a_raw_only_session_next_to_a_langfuse_one(tmp_path, capsys)
             "ai-toolkit",
             False,
             [],
-            id="before-since",
+            id="after-until",
         ),
+        pytest.param(
+            ["--since", "2026-10-06T14:58:42Z"], "ai-toolkit", False, [], id="after-first-record"
+        ),
+        pytest.param(["--session", RAW_ONLY], "ai-toolkit", True, [], id="explicit-session"),
         pytest.param(
             ["--since", "2026-10-06T14:57:00Z"], "ai-toolkit", True, [], id="in-window"
         ),

@@ -133,19 +133,25 @@ the collector's raw JSONL only says `mcp_tool` with no server, so a raw-only MCP
 published as `tool_mcp-unknown_*`. `hook_<name>_avg_ms` is `total_ms / runs` for the session,
 the mean time per run that a dashboard cannot compute from the other two, and is only sent when
 the hook ran. Only non-zero values are published, so a component that did
-not run, fail or block adds no score. The exceptions are `rule_<name>_reads` and
-`agent_<name>_calls`; the violation counts are non-zero only. Every on-demand
+not run, fail or block adds no score. The exceptions are `rule_<name>_reads`,
+`agent_<name>_calls` and `tool_mcp-<server>_calls`; the violation counts are non-zero only. Every on-demand
 rule in `--rules-dir` gets a score for every scored session, 0 when unread, so the "On-demand rule
 reads" widget lists the unused rules (a fixed cost of one score per rule, 6 today). Likewise every toolkit agent in `--agents-dir`
 (`.claude/agents`, 13 today) gets `agent_<name>_calls` for every scored session, 0 when the session
 launched none, so the unused agents show up; `_cost_usd` and `_llm_s` are never zero-filled, so
 their averages stay "when used", and neither `main` nor a built-in agent such as `Explore` gets a
-zero. Read a zero
+zero. Likewise every server in `--mcp-config` (`.ai-toolkit/mcp.json`, the `mcpServers` keys, the
+only servers a worker can use; 0 today) gets `tool_mcp-<server>_calls` for every scored session,
+0 when it was not called, so the "MCP servers: calls (total)" widget lists the unused ones. A
+missing or empty file, or an empty `mcpServers`, gives no zero and no error. Failures and waits
+are never zero-filled, and `mcp-unknown` never gets a zero. A raw-only MCP call is published as
+`tool_mcp-unknown_calls` with no server name, and could have been to any listed server, so a
+session with one gets no MCP zero at all: a false 0 would be worse than a missing one. Read a zero
 with care: `afk-answering`, `planning-hub` and `workflow` are mostly read by coordinator sessions,
 which send no telemetry, so for them 0 means "not tracked", not "unused". A long wait is a tool
 call blocked on the user for 10 s or more; shorter waits are automatic permission checks. A
 session publishes at most 3 x agents + 4 x tools + 4 x hook names + 1 x on-demand rules + 1 x toolkit agents
-plus 2 x review rule names (up to 38 in the worst case, 2 x the 18 rules plus `none`; a handful in
++ 1 x listed MCP servers plus 2 x review rule names (up to 38 in the worst case, 2 x the 18 rules plus `none`; a handful in
 practice) plus 2 x loaded rules (`cost_usd` and `loaded_requests`, up to 36 for the 18 rules)
 scores on top of its 18, where Bash adds up to 8 groups x 4 scores instead of 4 and the MCP tools add 4
 scores per server instead of 4 per tool; a hook name is its event and matcher, so each MCP tool

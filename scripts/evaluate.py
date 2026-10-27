@@ -407,10 +407,25 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("--raw-dir", type=Path, default=Path.home() / ".ai-toolkit" / "otel-raw")
     ap.add_argument("--rules-dir", type=Path, default=Path(".ai-toolkit/rules"))
     ap.add_argument("--agents-dir", type=Path, default=Path(".claude/agents"))
+    ap.add_argument("--mcp-config", type=Path, default=Path(".ai-toolkit/mcp.json"))
     ap.add_argument("--always-on-dir", type=Path, default=Path(".claude/rules/ai-toolkit"))
     ap.add_argument("--no-publish", action="store_true", help="print the report, push no scores")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     return ap.parse_args(argv)
+
+
+def load_mcp_servers(path: Path) -> list[str]:
+    """Return the sorted server names of an MCP config; a missing or empty file gives `[]`."""
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return []
+    if not text.strip():
+        return []
+    try:
+        return sorted(json.loads(text).get("mcpServers", {}))
+    except (json.JSONDecodeError, AttributeError):
+        raise EvalError(f"{path} is not a JSON object with an mcpServers object") from None
 
 
 def _to_epoch(flag: str, value: str | None) -> float | None:
@@ -548,6 +563,7 @@ def main(argv: list[str] | None = None, *, http=None, run=None) -> int:
         reports = _analyse_selected(selected, observations, raw, repos, run, load_rules)
         rule_names = sorted(p.stem for p in args.rules_dir.glob("*.md"))
         agent_names = sorted(p.stem for p in args.agents_dir.glob("*.md"))
+        mcp_servers = load_mcp_servers(args.mcp_config)
         agg = aggregate(
             reports,
             unused_rules=list_unused_rules(
@@ -567,7 +583,12 @@ def main(argv: list[str] | None = None, *, http=None, run=None) -> int:
                     s
                     for r in reports
                     if r.issue
-                    for s in build_scores(r, on_demand_rules=rule_names, toolkit_agents=agent_names)
+                    for s in build_scores(
+                        r,
+                        on_demand_rules=rule_names,
+                        toolkit_agents=agent_names,
+                        mcp_servers=mcp_servers,
+                    )
                 ],
             )
     except EvalError as e:

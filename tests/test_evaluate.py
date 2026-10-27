@@ -960,7 +960,7 @@ def test_build_scores_gives_no_mcp_zero_to_a_session_with_an_unknown_server_call
         ('{"mcpServers": {"my.server": {}, "ok-name_1": {}}}', ["my_server", "ok-name_1"]),
     ],
 )
-def test_load_mcp_servers_gives_no_server_for_a_missing_or_empty_config(
+def test_load_mcp_servers_names_servers_as_tool_calls_do_and_none_for_an_empty_config(
     tmp_path, content, servers
 ):
     path = tmp_path / "mcp.json"

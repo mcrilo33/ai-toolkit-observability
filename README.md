@@ -150,8 +150,8 @@ session with one gets no MCP zero at all: a false 0 would be worse than a missin
 with care: `afk-answering`, `planning-hub` and `workflow` are mostly read by coordinator sessions,
 which send no telemetry, so for them 0 means "not tracked", not "unused". A long wait is a tool
 call blocked on the user for 10 s or more; shorter waits are automatic permission checks. A
-session publishes at most 3 x agents + 4 x tools + 4 x hook names + 1 x on-demand rules + 1 x toolkit agents
-+ 1 x listed MCP servers plus 2 x review rule names (up to 38 in the worst case, 2 x the 18 rules plus `none`; a handful in
+session publishes at most 3 x agents + 4 x tools + 4 x hook names + 1 x on-demand rules + 1 x toolkit agents +
+1 x listed MCP servers plus 2 x review rule names (up to 38 in the worst case, 2 x the 18 rules plus `none`; a handful in
 practice) plus 2 x loaded rules (`cost_usd` and `loaded_requests`, up to 36 for the 18 rules)
 scores on top of its 18, where Bash adds up to 8 groups x 4 scores instead of 4 and the MCP tools add 4
 scores per server instead of 4 per tool; a hook name is its event and matcher, so each MCP tool

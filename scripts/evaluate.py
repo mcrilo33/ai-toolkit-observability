@@ -423,9 +423,12 @@ def load_mcp_servers(path: Path) -> list[str]:
     if not text.strip():
         return []
     try:
-        return sorted(json.loads(text).get("mcpServers", {}))
+        servers = json.loads(text).get("mcpServers") or {}
     except (json.JSONDecodeError, AttributeError):
-        raise EvalError(f"{path} is not a JSON object with an mcpServers object") from None
+        servers = None
+    if not isinstance(servers, dict):
+        raise EvalError(f"{path} is not a JSON object with an mcpServers object")
+    return sorted(servers)
 
 
 def _to_epoch(flag: str, value: str | None) -> float | None:

@@ -141,7 +141,7 @@ reads" widget lists the unused rules (a fixed cost of one score per rule, 6 toda
 launched none, so the unused agents show up; `_cost_usd` and `_llm_s` are never zero-filled, so
 their averages stay "when used", and neither `main` nor a built-in agent such as `Explore` gets a
 zero. Likewise every server in `--mcp-config` (`.ai-toolkit/mcp.json`, the `mcpServers` keys, the
-only servers a worker can use; 0 today) gets `tool_mcp-<server>_calls` for every scored session,
+only servers a worker can use, named as in a tool call: a character outside `[A-Za-z0-9_-]` becomes `_`; 0 today) gets `tool_mcp-<server>_calls` for every scored session,
 0 when it was not called, so the "MCP servers: calls (total)" widget lists the unused ones. A
 missing or empty file, or an empty `mcpServers`, gives no zero and no error. Failures and waits
 are never zero-filled, and `mcp-unknown` never gets a zero. A raw-only MCP call is published as

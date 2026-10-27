@@ -415,7 +415,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def load_mcp_servers(path: Path) -> list[str]:
-    """Return the sorted server names of an MCP config; a missing or empty file gives `[]`."""
+    """Return the sorted server names of an MCP config; a missing or empty file gives `[]`.
+
+    A name is spelled as in a tool call: a character outside `[A-Za-z0-9_-]` becomes `_`.
+    """
     try:
         text = path.read_text()
     except FileNotFoundError:
@@ -428,7 +431,7 @@ def load_mcp_servers(path: Path) -> list[str]:
         servers = None
     if not isinstance(servers, dict):
         raise EvalError(f"{path} is not a JSON object with an mcpServers object")
-    return sorted(servers)
+    return sorted(re.sub(r"[^A-Za-z0-9_-]", "_", name) for name in servers)
 
 
 def _to_epoch(flag: str, value: str | None) -> float | None:

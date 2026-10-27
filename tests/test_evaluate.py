@@ -957,6 +957,7 @@ def test_build_scores_gives_no_mcp_zero_to_a_session_with_an_unknown_server_call
         ('{"mcpServers": {}}', []),
         ('{"mcpServers": null}', []),
         ('{"mcpServers": {"serena": {}, "context7": {}}}', ["context7", "serena"]),
+        ('{"mcpServers": {"my.server": {}, "ok-name_1": {}}}', ["my_server", "ok-name_1"]),
     ],
 )
 def test_load_mcp_servers_gives_no_server_for_a_missing_or_empty_config(

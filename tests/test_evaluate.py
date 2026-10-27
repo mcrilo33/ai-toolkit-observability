@@ -919,6 +919,63 @@ def test_build_scores_zeroes_calls_of_unused_toolkit_agents_only():
     assert "agent_main_calls" not in published
 
 
+def test_build_scores_zeroes_calls_of_unused_listed_mcp_servers_only():
+    observations = [
+        make_obs("tool:mcp__serena__find_symbol", 200, 205),
+        make_obs("tool:mcp__serena__find_file", 210, 211),
+    ]
+    attribution = run_attribution(ev.build_leaves(observations, []), [])
+
+    scores = ev.build_scores(
+        make_report(attribution=attribution), mcp_servers=["context7", "serena"]
+    )
+
+    published = {s["name"]: s["value"] for s in scores}
+    assert published["tool_mcp-serena_calls"] == 2
+    assert published["tool_mcp-context7_calls"] == 0
+    assert not [n for n in published if n.startswith("tool_mcp-context7_") and "calls" not in n]
+    assert not [n for n in published if n.startswith("tool_mcp-unknown_")]
+
+
+def test_build_scores_gives_no_mcp_zero_to_a_session_with_an_unknown_server_call():
+    raw_only = [raw_tool_result(220, "toolu_mcp", "mcp_tool")]
+    attribution = run_attribution(ev.build_leaves([], raw_only), [])
+
+    scores = ev.build_scores(make_report(attribution=attribution), mcp_servers=["context7"])
+
+    published = {s["name"]: s["value"] for s in scores}
+    assert published["tool_mcp-unknown_calls"] == 1
+    assert "tool_mcp-context7_calls" not in published
+
+
+@pytest.mark.parametrize(
+    ("content", "servers"),
+    [
+        (None, []),
+        ("", []),
+        ("{}", []),
+        ('{"mcpServers": {}}', []),
+        ('{"mcpServers": {"serena": {}, "context7": {}}}', ["context7", "serena"]),
+    ],
+)
+def test_load_mcp_servers_gives_no_server_for_a_missing_or_empty_config(
+    tmp_path, content, servers
+):
+    path = tmp_path / "mcp.json"
+    if content is not None:
+        path.write_text(content)
+
+    assert ev.load_mcp_servers(path) == servers
+
+
+def test_load_mcp_servers_rejects_a_config_that_is_not_json(tmp_path):
+    path = tmp_path / "mcp.json"
+    path.write_text("not json")
+
+    with pytest.raises(ev.EvalError, match="mcpServers"):
+        ev.load_mcp_servers(path)
+
+
 class FakeHttp:
     def __init__(self, down=False):
         self.calls, self.down = [], down
@@ -1116,7 +1173,7 @@ def test_fetch_observations_follows_the_cursor():
 
 
 # The World session: 16 session-level scores plus its component scores (17 with the raw hooks).
-WORLD_SCORES, WORLD_SCORES_NO_RAW = 35, 32
+WORLD_SCORES, WORLD_SCORES_NO_RAW = 37, 34
 
 
 class World:
@@ -1160,6 +1217,8 @@ class World:
         )
         for d in (self.raw_dir, self.rules_dir, self.always_dir, self.agents_dir):
             d.mkdir()
+        self.mcp_config = tmp_path / "mcp.json"
+        self.mcp_config.write_text('{"mcpServers": {"serena": {}, "context7": {}}}')
         (self.agents_dir / "code-review.md").write_text("x")
         (self.agents_dir / "debug.md").write_text("x")
         (self.rules_dir / "bug-triage.md").write_text("x")
@@ -1203,6 +1262,8 @@ class World:
             str(self.always_dir),
             "--agents-dir",
             str(self.agents_dir),
+            "--mcp-config",
+            str(self.mcp_config),
             *extra,
         ]
         return ev.main(argv, http=self.http, run=self.run)
@@ -1230,6 +1291,7 @@ def test_main_reports_one_session_and_a_rerun_posts_the_same_score_ids(tmp_path,
     assert {c[2]["environment"] for c in world.http_calls if c[0] == "POST"} == {
         "ai-toolkit-observability"
     }
+    assert {"tool_mcp-serena_calls", "tool_mcp-context7_calls"} <= posted
     assert World.KEY not in out and not any(World.KEY in " ".join(a) for a in world.run_calls)
 
 
@@ -1386,7 +1448,7 @@ def test_main_routes_each_session_to_the_gh_and_git_of_its_own_repo(tmp_path, ca
     assert world.main("--repo", f"ai-toolkit=owner/ai-toolkit={checkout}") == 0
 
     out = capsys.readouterr().out
-    assert len(world.posted_ids()) == 60  # two sessions of issue #1 in two repos do not collide
+    assert len(world.posted_ids()) == 64  # two sessions of issue #1 in two repos do not collide
     assert "feat: toolkit work" in out and "feat: x" in out
     views = [a[a.index("-R") + 1] for a in world.run_calls if a[:3] == ["gh", "issue", "view"]]
     assert sorted(views) == ["owner/ai-toolkit", CWD_SLUG]

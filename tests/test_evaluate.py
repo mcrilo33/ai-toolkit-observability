@@ -955,6 +955,7 @@ def test_build_scores_gives_no_mcp_zero_to_a_session_with_an_unknown_server_call
         ("", []),
         ("{}", []),
         ('{"mcpServers": {}}', []),
+        ('{"mcpServers": null}', []),
         ('{"mcpServers": {"serena": {}, "context7": {}}}', ["context7", "serena"]),
     ],
 )
@@ -968,9 +969,10 @@ def test_load_mcp_servers_gives_no_server_for_a_missing_or_empty_config(
     assert ev.load_mcp_servers(path) == servers
 
 
-def test_load_mcp_servers_rejects_a_config_that_is_not_json(tmp_path):
+@pytest.mark.parametrize("content", ["not json", "[]", '{"mcpServers": "ab"}'])
+def test_load_mcp_servers_rejects_a_config_without_an_mcp_servers_object(tmp_path, content):
     path = tmp_path / "mcp.json"
-    path.write_text("not json")
+    path.write_text(content)
 
     with pytest.raises(ev.EvalError, match="mcpServers"):
         ev.load_mcp_servers(path)
